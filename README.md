@@ -1,2 +1,90 @@
 # .github
-Default community health files and shared workflows
+
+Shared files for my repositories: default community health files, and the `decisions` check as a reusable workflow.
+
+## Default community files
+
+GitHub uses these for every repository of this account that has no copy of its own:
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how an issue becomes a pull request.
+- [`.github/ISSUE_TEMPLATE/planned_change.yml`](.github/ISSUE_TEMPLATE/planned_change.yml) — the **Planned change**
+  issue form: Today, Wanted, To decide, Done when.
+- [`.github/pull_request_template.md`](.github/pull_request_template.md) — a prose summary, the final decisions, and
+  `Closes #`.
+
+A repository with its own `.github/ISSUE_TEMPLATE/` folder uses none of the default issue templates, so it needs its
+own copy of Planned change.
+
+## The `decisions` check
+
+An issue's open questions sit under `## To decide`. Once they are answered, the section becomes `## Decisions`. A pull
+request must link an issue whose decisions are written down.
+
+[`.github/workflows/decisions.yml`](.github/workflows/decisions.yml) enforces this. On a pull request it checks, in
+order:
+
+1. A head branch starting with `renovate/` or `release-please--` passes; nothing else is checked.
+2. If `CLAUDE.md` on the base commit has the line `## Where decisions live`, the pull request must keep that line.
+   Repositories without the section are unaffected. The opt-outs below do not skip this rule.
+3. With an opt-out, the check stops here and passes.
+4. The pull request must link at least one issue (`Closes #N`, `Fixes #N`, `Resolves #N`, or a link set in the
+   sidebar). Closing keywords only link an issue when the pull request targets the default branch.
+5. Every linked issue needs a `## Decisions` section with some text in it. A pointer such as "See epic #1896." is
+   enough.
+6. No linked issue may still have a `## To decide` section.
+
+Headings count only as exact level-2 lines (`## Decisions`, not `### Decisions`) outside fenced code blocks. When a
+linked issue is edited, the check of every open pull request that closes it runs again.
+
+The logic is in [`scripts/decisions.py`](scripts/decisions.py) (Python 3 standard library only). The workflow runs the
+script from the same commit of this repository that the caller pins.
+
+### Opting out
+
+For a small fix without decisions, either:
+
+- write `decisions: none` anywhere in the pull request description (any case, any spacing after the colon), or
+- add the label `no-decisions`.
+
+### Calling it
+
+Add a workflow to the repository, for example `.github/workflows/decisions.yml`:
+
+```yaml
+name: decisions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+  issues:
+    types: [edited]
+
+permissions: {}
+
+jobs:
+  decisions:
+    permissions:
+      actions: write        # re-run pull request checks after an issue edit
+      contents: read        # read CLAUDE.md
+      issues: read          # read the linked issues
+      pull-requests: read   # read the pull request, its labels and linked issues
+    uses: danielcopper/.github/.github/workflows/decisions.yml@<full-commit-sha>
+```
+
+- Pin `<full-commit-sha>` to a full commit SHA of this repository, not a branch or tag. The checker script is
+  checked out at that same commit.
+- A called workflow can only reduce the token permissions its caller grants, so the caller grants all four. Each
+  job of the reusable workflow keeps only what it needs; `actions: write` is used only on issue edits.
+- Issue events run the workflow file from the default branch, so re-runs work once the caller is merged there.
+- Pull requests from forks get a read-only token, which is all the check needs. The re-run after an issue edit is
+  requested by the issue event's run, with a token of the base repository.
+- To make the check required, add it to the branch's ruleset. With the caller above, it appears as
+  `decisions / decisions`.
+
+## Development
+
+```sh
+python3 -m unittest discover -s tests
+```
+
+The tests also run in CI on every pull request and on pushes to `main`.
