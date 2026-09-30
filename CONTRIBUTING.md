@@ -4,15 +4,15 @@ Thanks for your interest. These repositories are maintained by one person, so th
 
 ## Before you write code
 
-1. Open an issue first. For a change, use the **Planned change** template; bug reports and feature requests have
-   their own. Typo fixes and dependency bumps don't need an issue.
+1. Open an issue first. For a change, use the **Planned change** template. Typo fixes and dependency bumps don't
+   need an issue.
 2. Open questions go under `## To decide`. I answer them in the issue, and the section then becomes `## Decisions`.
    Please don't start implementing while `## To decide` is still there — the PR check will fail.
 
 ## The pull request
 
 - Link the issue (`Closes #N`).
-- Fill in the PR template: a prose summary (it becomes the squash commit message) and the final decisions. A test
+- Fill in the PR template: a prose summary (it becomes the squash commit body) and the final decisions. A test
   should be seen failing before the change makes it pass.
 - Update the documentation in the same PR when behavior changes.
 - A small fix without decisions: write `decisions: none` in the PR description.
