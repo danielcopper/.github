@@ -36,8 +36,11 @@ OPT_OUT_LABEL = "no-decisions"
 OPT_OUT_BODY = re.compile(r"decisions:\s*none", re.IGNORECASE)
 EXEMPT_BRANCH_PREFIXES = ("renovate/", "release-please--")
 
-_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-_ATX_HEADING = re.compile(r"^(#{1,6})(?: (.*))?$")
+# Markdown as CommonMark reads it: headings and fences may be indented up to three spaces.
+_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+_ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
+_CLOSING_SEQUENCE = re.compile(r"(?:^|[ \t]+)#+$")
 
 
 # --- Markdown -------------------------------------------------------------
@@ -46,36 +49,42 @@ _ATX_HEADING = re.compile(r"^(#{1,6})(?: (.*))?$")
 def _unfenced_lines(text: str) -> list[str | None]:
     """Return the lines of text, with every line inside a fenced code block as None.
 
-    A fence opens with three or more backticks or tildes (indented at most three
-    spaces) and closes with a line of at least as many of the same character.
-    An unclosed fence runs to the end of the text.
+    A fence opens with three or more backticks or tildes, indented at most three
+    spaces; a backtick fence's info string may not contain a backtick. It closes
+    with a line of at least as many of the same character, indented at most
+    three spaces and followed only by whitespace. An unclosed fence runs to the
+    end of the text.
     """
     result: list[str | None] = []
     fence: str | None = None
     for line in text.splitlines():
         if fence is None:
             opening = _FENCE_OPEN.match(line)
-            if opening:
+            if opening and not (opening.group(1)[0] == "`" and "`" in opening.group(2)):
                 fence = opening.group(1)
                 result.append(None)
             else:
                 result.append(line.rstrip())
         else:
-            stripped = line.strip()
-            if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+            closing = _FENCE_CLOSE.match(line)
+            if closing and closing.group(1)[0] == fence[0] and len(closing.group(1)) >= len(fence):
                 fence = None
             result.append(None)
     return result
 
 
 def _heading(line: str | None) -> tuple[int, str] | None:
-    """The level and title of an ATX heading line such as `### Decisions`, else None."""
+    """The level and title of an ATX heading line such as `### Decisions`, else None.
+
+    An optional closing sequence of `#`s is dropped: `## Decisions ##` has the title `Decisions`.
+    """
     if line is None:
         return None
     match = _ATX_HEADING.match(line)
     if not match:
         return None
-    return len(match.group(1)), match.group(2) or ""
+    title = _CLOSING_SEQUENCE.sub("", match.group(2) or "")
+    return len(match.group(1)), title.strip()
 
 
 def _is_content(line: str | None) -> bool:

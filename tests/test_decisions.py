@@ -259,10 +259,6 @@ class DecisionsSectionTest(unittest.TestCase):
         body = "## Wanted\n\n```markdown\n## Decisions\n\n- Fake.\n```\n"
         self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
 
-    def test_level2_heading_inside_fenced_code_does_not_end_the_section(self):
-        body = "## Decisions\n\n```\n## Not a heading\n```\n"
-        self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
-
     def test_level3_decisions_passes(self):
         body = "### Decisions\n\n- Level three.\n"
         self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
@@ -319,6 +315,79 @@ class DecisionsSectionTest(unittest.TestCase):
     def test_second_decisions_section_with_content_passes(self):
         body = "## Decisions\n\n## Decisions\n\n- Yes.\n"
         self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
+
+
+class CommonMarkTest(unittest.TestCase):
+    """Headings and fences follow CommonMark, read through the Decisions and To decide rules."""
+
+    def passes(self, body):
+        return evaluate(pull_request(issues=[issue(body)])).passed
+
+    def test_heading_indented_up_to_three_spaces_counts(self):
+        for indent in (" ", "  ", "   "):
+            with self.subTest(indent=len(indent)):
+                self.assertTrue(self.passes(indent + "## Decisions\n\n- Yes.\n"))
+                self.assertFalse(self.passes(GOOD_ISSUE + indent + "### To decide\n\n- Which way?\n"))
+
+    def test_heading_indented_four_spaces_does_not_count(self):
+        self.assertFalse(self.passes("    ## Decisions\n\n- Yes.\n"))
+        self.assertTrue(self.passes(GOOD_ISSUE + "    ## To decide\n\n- Which way?\n"))
+
+    def test_closing_sequence_is_stripped(self):
+        self.assertTrue(self.passes("## Decisions ##\n\n- Yes.\n"))
+        self.assertTrue(self.passes("### Decisions #####  \n\n- Yes.\n"))
+        self.assertFalse(self.passes(GOOD_ISSUE + "### To decide ###\n\n- Which way?\n"))
+
+    def test_hashes_without_a_space_are_part_of_the_title(self):
+        self.assertFalse(self.passes("## Decisions##\n\n- Yes.\n"))
+
+    def test_title_before_the_closing_sequence_must_still_match(self):
+        self.assertFalse(self.passes("## Decisions later ##\n\n- Yes.\n"))
+
+    def test_spaces_or_tabs_after_the_opening_hashes(self):
+        for separator in ("  ", "\t", " \t "):
+            with self.subTest(separator=separator):
+                self.assertTrue(self.passes("##" + separator + "Decisions\n\n- Yes.\n"))
+
+    def test_no_space_after_the_opening_hashes_is_not_a_heading(self):
+        self.assertFalse(self.passes("##Decisions\n\n- Yes.\n"))
+
+    def test_title_stays_case_sensitive(self):
+        self.assertFalse(self.passes("## decisions\n\n- Yes.\n"))
+        self.assertTrue(self.passes(GOOD_ISSUE + "## to decide\n\n- Which way?\n"))
+        verdict = evaluate(pull_request(base_claude_md=CLAUDE_WITH_SECTION, head_claude_md="## where decisions live\n"))
+        self.assertFalse(verdict.passed)
+
+    def test_backtick_info_string_with_a_backtick_is_not_a_fence(self):
+        body = GOOD_ISSUE + "\n``` not`a fence\n## To decide\n\n- Which way?\n"
+        self.assertFalse(self.passes(body))
+
+    def test_tilde_info_string_with_a_backtick_is_a_fence(self):
+        body = GOOD_ISSUE + "\n~~~ a`fence\n## To decide\n\n- Which way?\n~~~\n"
+        self.assertTrue(self.passes(body))
+
+    def test_fence_indented_up_to_three_spaces_hides_headings(self):
+        body = GOOD_ISSUE + "\n   ```\n## To decide\n\n- Which way?\n   ```\n"
+        self.assertTrue(self.passes(body))
+
+    def test_fence_indented_four_spaces_is_not_a_fence(self):
+        body = GOOD_ISSUE + "\n    ```\n## To decide\n\n- Which way?\n"
+        self.assertFalse(self.passes(body))
+
+    def test_closing_fence_indented_up_to_three_spaces_closes(self):
+        self.assertTrue(self.passes("```\ncode\n   ```\n## Decisions\n\n- Yes.\n"))
+
+    def test_closing_fence_indented_four_spaces_does_not_close(self):
+        self.assertFalse(self.passes("```\ncode\n    ```\n## Decisions\n\n- Yes.\n"))
+
+    def test_closing_fence_with_trailing_text_does_not_close(self):
+        self.assertFalse(self.passes("```\ncode\n``` more\n## Decisions\n\n- Yes.\n"))
+
+    def test_shorter_closing_fence_does_not_close(self):
+        self.assertFalse(self.passes("````\ncode\n```\n## Decisions\n\n- Yes.\n"))
+
+    def test_other_fence_character_does_not_close(self):
+        self.assertFalse(self.passes("```\ncode\n~~~\n## Decisions\n\n- Yes.\n"))
 
 
 class ToDecideTest(unittest.TestCase):
