@@ -29,6 +29,24 @@ It works another way.
 - It works the other way.
 """
 
+FORM_ISSUE = """\
+### Today
+
+It works one way.
+
+### Wanted
+
+It works another way.
+
+### Decisions
+
+- Do it the other way.
+
+### Done when
+
+- It works the other way.
+"""
+
 CLAUDE_WITH_SECTION = """\
 # Project
 
@@ -126,6 +144,16 @@ class ClaudeMdGuardTest(unittest.TestCase):
         verdict = evaluate(pull_request(base_claude_md=CLAUDE_WITH_SECTION, head_claude_md=head))
         self.assertTrue(verdict.passed)
 
+    def test_level3_section_in_head_does_not_count(self):
+        head = "### Where decisions live\n"
+        verdict = evaluate(pull_request(base_claude_md=CLAUDE_WITH_SECTION, head_claude_md=head))
+        self.assertFalse(verdict.passed)
+
+    def test_level3_section_in_base_is_unaffected(self):
+        base = "### Where decisions live\n"
+        verdict = evaluate(pull_request(base_claude_md=base, head_claude_md=CLAUDE_WITHOUT_SECTION))
+        self.assertTrue(verdict.passed)
+
     def test_heading_with_different_text_does_not_count(self):
         head = "## Where decisions live now\n"
         verdict = evaluate(pull_request(base_claude_md=CLAUDE_WITH_SECTION, head_claude_md=head))
@@ -210,7 +238,7 @@ class DecisionsSectionTest(unittest.TestCase):
         self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
 
     def test_level3_subheading_inside_decisions_counts_as_content(self):
-        body = "## Decisions\n\n### Storage\n\n## Done when\n\n- Z\n"
+        body = "## Decisions\n\n### D1: storage\n\n## Done when\n\n- Z\n"
         self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
 
     def test_decisions_heading_inside_fenced_code_does_not_count(self):
@@ -221,8 +249,49 @@ class DecisionsSectionTest(unittest.TestCase):
         body = "## Decisions\n\n```\n## Not a heading\n```\n"
         self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
 
-    def test_level3_decisions_heading_does_not_count(self):
+    def test_level3_decisions_passes(self):
         body = "### Decisions\n\n- Level three.\n"
+        self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_level4_decisions_does_not_count(self):
+        body = "#### Decisions\n\n- Level four.\n"
+        self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_level1_decisions_does_not_count(self):
+        body = "# Decisions\n\n- Level one.\n"
+        self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_issue_form_body_with_decisions_passes(self):
+        self.assertTrue(evaluate(pull_request(issues=[issue(FORM_ISSUE)])).passed)
+
+    def test_no_response_decisions_fails(self):
+        body = "### Wanted\n\nY\n\n### Decisions\n\n_No response_\n\n### Done when\n\n- Z\n"
+        verdict = evaluate(pull_request(issues=[issue(body, number=6)]))
+        self.assertFalse(verdict.passed)
+        self.assertIn("Issue #6 has a `## Decisions` section, but it is empty", verdict.errors[0])
+
+    def test_no_response_with_surrounding_whitespace_fails(self):
+        body = "## Decisions\n\n  _No response_  \n\n"
+        self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_no_response_next_to_real_content_passes(self):
+        body = "## Decisions\n\n_No response_\n\n- A real decision.\n"
+        self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_level3_decisions_ends_at_the_next_level3_heading(self):
+        body = "### Decisions\n\n### Done when\n\n- Z\n"
+        self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_level3_decisions_ends_at_the_next_level2_heading(self):
+        body = "### Decisions\n\n## Done when\n\n- Z\n"
+        self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_level4_heading_inside_level3_decisions_counts_as_content(self):
+        body = "### Decisions\n\n#### D1: storage\n\n### Done when\n\n- Z\n"
+        self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_level2_decisions_ends_at_the_next_level1_heading(self):
+        body = "## Decisions\n\n# Appendix\n\nText.\n"
         self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
 
     def test_windows_line_endings(self):
@@ -255,8 +324,18 @@ class ToDecideTest(unittest.TestCase):
         body = GOOD_ISSUE + "\n```\n## To decide\n```\n"
         self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
 
-    def test_level3_to_decide_does_not_count(self):
+    def test_level3_to_decide_fails(self):
         body = GOOD_ISSUE + "\n### To decide\n\n- Which way?\n"
+        verdict = evaluate(pull_request(issues=[issue(body, number=9)]))
+        self.assertFalse(verdict.passed)
+        self.assertIn("Issue #9 still has a `## To decide` section", verdict.errors[0])
+
+    def test_issue_form_body_with_to_decide_fails(self):
+        body = FORM_ISSUE.replace("### Decisions", "### To decide")
+        self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_level4_to_decide_does_not_count(self):
+        body = GOOD_ISSUE + "\n#### To decide\n\n- Which way?\n"
         self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
 
 

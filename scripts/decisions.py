@@ -28,11 +28,16 @@ DECISIONS = "Decisions"
 TO_DECIDE = "To decide"
 CLAUDE_MD = "CLAUDE.md"
 CLAUDE_MD_SECTION = "Where decisions live"
+# Issue forms render each field as a level-3 heading; hand-written issues use level 2.
+ISSUE_HEADING_LEVELS = (2, 3)
+# What an issue form writes for an optional field left blank.
+NO_RESPONSE = "_No response_"
 OPT_OUT_LABEL = "no-decisions"
 OPT_OUT_BODY = re.compile(r"decisions:\s*none", re.IGNORECASE)
 EXEMPT_BRANCH_PREFIXES = ("renovate/", "release-please--")
 
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_ATX_HEADING = re.compile(r"^(#{1,6})(?: (.*))?$")
 
 
 # --- Markdown -------------------------------------------------------------
@@ -63,26 +68,52 @@ def _unfenced_lines(text: str) -> list[str | None]:
     return result
 
 
-def _is_level2_heading(line: str) -> bool:
-    return line == "##" or line.startswith("## ")
+def _heading(line: str | None) -> tuple[int, str] | None:
+    """The level and title of an ATX heading line such as `### Decisions`, else None."""
+    if line is None:
+        return None
+    match = _ATX_HEADING.match(line)
+    if not match:
+        return None
+    return len(match.group(1)), match.group(2) or ""
 
 
-def has_heading(text: str, title: str) -> bool:
-    """Whether text has a line that is exactly `## <title>` outside fenced code."""
-    wanted = f"## {title}"
-    return any(line == wanted for line in _unfenced_lines(text))
+def _is_content(line: str | None) -> bool:
+    """Whether a line inside a section counts as written content.
+
+    Fenced lines count. Blank lines and an issue form's `_No response_` do not.
+    """
+    if line is None:
+        return True
+    stripped = line.strip()
+    return bool(stripped) and stripped != NO_RESPONSE
 
 
-def section_has_content(text: str, title: str) -> bool:
-    """Whether a `## <title>` section has non-whitespace text before the next level-2 heading."""
-    wanted = f"## {title}"
-    in_section = False
+def has_heading(text: str, title: str, levels: tuple[int, ...]) -> bool:
+    """Whether text has a heading of one of the levels with exactly this title, outside fenced code."""
+    return any(
+        heading is not None and heading[0] in levels and heading[1] == title
+        for heading in map(_heading, _unfenced_lines(text))
+    )
+
+
+def section_has_content(text: str, title: str, levels: tuple[int, ...]) -> bool:
+    """Whether a section with this title has content.
+
+    The section starts at a heading of one of the levels with exactly this
+    title and ends at the next heading of the same or a higher level (fewer
+    `#`). Deeper headings inside it are content.
+    """
+    open_level: int | None = None
     for line in _unfenced_lines(text):
-        if line is not None and _is_level2_heading(line):
-            in_section = line == wanted
+        heading = _heading(line)
+        if heading is not None and open_level is not None and heading[0] <= open_level:
+            open_level = None
+        if heading is not None and open_level is None:
+            if heading[0] in levels and heading[1] == title:
+                open_level = heading[0]
             continue
-        if in_section and (line is None or line.strip()):
-            # A fenced line inside the section is content as well.
+        if open_level is not None and _is_content(line):
             return True
     return False
 
@@ -128,14 +159,14 @@ def is_opted_out(labels: list[str], body: str) -> bool:
 
 def claude_md_error(base: str | None, head: str | None) -> str | None:
     """The CLAUDE.md guard: a section the base branch has must not be removed."""
-    if base is None or not has_heading(base, CLAUDE_MD_SECTION):
+    if base is None or not has_heading(base, CLAUDE_MD_SECTION, levels=(2,)):
         return None
     if head is None:
         return (
             f"This pull request deletes {CLAUDE_MD}, which on the base branch has the "
             f"section `## {CLAUDE_MD_SECTION}`. Keep the file and the section."
         )
-    if not has_heading(head, CLAUDE_MD_SECTION):
+    if not has_heading(head, CLAUDE_MD_SECTION, levels=(2,)):
         return (
             f"This pull request removes the section `## {CLAUDE_MD_SECTION}` from "
             f"{CLAUDE_MD}. The base branch has it; keep it."
@@ -146,17 +177,17 @@ def claude_md_error(base: str | None, head: str | None) -> str | None:
 def issue_errors(issue: Issue, repository: str) -> list[str]:
     name = f"#{issue.number}" if issue.repository == repository else f"{issue.repository}#{issue.number}"
     errors = []
-    if not has_heading(issue.body, DECISIONS):
+    if not has_heading(issue.body, DECISIONS, ISSUE_HEADING_LEVELS):
         errors.append(
             f"Issue {name} has no `## {DECISIONS}` section. Write the decisions down in the "
             f"issue under `## {DECISIONS}` before the pull request can pass."
         )
-    elif not section_has_content(issue.body, DECISIONS):
+    elif not section_has_content(issue.body, DECISIONS, ISSUE_HEADING_LEVELS):
         errors.append(
             f"Issue {name} has a `## {DECISIONS}` section, but it is empty. Write the "
             "decisions into it (a pointer such as \"See epic #N.\" is enough)."
         )
-    if has_heading(issue.body, TO_DECIDE):
+    if has_heading(issue.body, TO_DECIDE, ISSUE_HEADING_LEVELS):
         errors.append(
             f"Issue {name} still has a `## {TO_DECIDE}` section, so it has open questions. "
             f"Settle them, then rename the section to `## {DECISIONS}`."

@@ -30,11 +30,15 @@ order:
 4. The pull request must link at least one issue (`Closes #N`, `Fixes #N`, `Resolves #N`, or a link set in the
    sidebar). Closing keywords only link an issue when the pull request targets the default branch.
 5. Every linked issue needs a `## Decisions` section with some text in it. A pointer such as "See epic #1896." is
-   enough.
+   enough. `_No response_`, which an issue form writes for a field left blank, does not count as text.
 6. No linked issue may still have a `## To decide` section.
 
-Headings count only as exact level-2 lines (`## Decisions`, not `### Decisions`) outside fenced code blocks. When a
-linked issue is edited, the check of every open pull request that closes it runs again.
+In an issue, `## Decisions` and `## To decide` count at level 2 or level 3 (`### Decisions`, as an issue form writes
+it), with exactly that title and outside fenced code blocks. A section ends at the next heading of the same or a
+higher level, so a `### D1: …` heading under `## Decisions` is part of it. The `CLAUDE.md` section counts only as
+the level-2 line `## Where decisions live`.
+
+When a linked issue is edited, the check of every open pull request that closes it runs again.
 
 The logic is in [`scripts/decisions.py`](scripts/decisions.py) (Python 3 standard library only). The workflow runs the
 script from the same commit of this repository that the caller pins.
