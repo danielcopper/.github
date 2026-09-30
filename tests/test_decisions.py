@@ -1,4 +1,5 @@
 import contextlib
+import dataclasses
 import io
 import sys
 import unittest
@@ -73,7 +74,7 @@ def issue(body, number=1, repository=REPO):
 
 
 def pull_request(**overrides):
-    fields = dict(
+    default = PullRequest(
         repository=REPO,
         head_branch="feature/thing",
         body="Closes #1",
@@ -82,8 +83,7 @@ def pull_request(**overrides):
         head_claude_md=None,
         issues=[issue(GOOD_ISSUE)],
     )
-    fields.update(overrides)
-    return PullRequest(**fields)
+    return dataclasses.replace(default, **overrides)
 
 
 class ExemptBranchTest(unittest.TestCase):
@@ -377,7 +377,7 @@ class FakeClient:
         self.graphql_calls = []
         self.reruns = []
 
-    def graphql(self, query, variables):
+    def graphql(self, _query, variables):
         self.graphql_calls.append(variables)
         return self.graphql_data
 
