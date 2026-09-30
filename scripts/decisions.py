@@ -187,7 +187,8 @@ def issue_errors(issue: Issue, repository: str) -> list[str]:
             f"Issue {name} has a `## {DECISIONS}` section, but it is empty. Write the "
             "decisions into it (a pointer such as \"See epic #N.\" is enough)."
         )
-    if has_heading(issue.body, TO_DECIDE, ISSUE_HEADING_LEVELS):
+    # An empty To decide section, such as a blank issue form field, holds no open questions.
+    if section_has_content(issue.body, TO_DECIDE, ISSUE_HEADING_LEVELS):
         errors.append(
             f"Issue {name} still has a `## {TO_DECIDE}` section, so it has open questions. "
             f"Settle them, then rename the section to `## {DECISIONS}`."

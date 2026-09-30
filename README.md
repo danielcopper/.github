@@ -31,7 +31,8 @@ order:
    sidebar). Closing keywords only link an issue when the pull request targets the default branch.
 5. Every linked issue needs a `## Decisions` section with some text in it. A pointer such as "See epic #1896." is
    enough. `_No response_`, which an issue form writes for a field left blank, does not count as text.
-6. No linked issue may still have a `## To decide` section.
+6. No linked issue may still have a `## To decide` section with text in it. An empty one, such as the `_No response_`
+   an issue form writes for a blank field, holds no open questions and does not count.
 
 In an issue, `## Decisions` and `## To decide` count at level 2 or level 3 (`### Decisions`, as an issue form writes
 it), with exactly that title and outside fenced code blocks. A section ends at the next heading of the same or a

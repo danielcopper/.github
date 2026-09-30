@@ -334,6 +334,41 @@ class ToDecideTest(unittest.TestCase):
         body = FORM_ISSUE.replace("### Decisions", "### To decide")
         self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
 
+    def test_empty_to_decide_passes(self):
+        body = GOOD_ISSUE + "\n## To decide\n"
+        self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_empty_to_decide_before_the_next_section_passes(self):
+        body = "## To decide\n\n## Decisions\n\n- Yes.\n"
+        self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_whitespace_only_to_decide_passes(self):
+        body = GOOD_ISSUE + "\n## To decide\n\n   \n\t\n"
+        self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_issue_form_blank_to_decide_passes_when_decisions_has_content(self):
+        body = FORM_ISSUE.replace("### Done when", "### To decide\n\n_No response_\n\n### Done when")
+        self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_level3_to_decide_ends_at_the_next_level3_heading(self):
+        body = FORM_ISSUE.replace("### Done when", "### To decide\n\n### Done when")
+        self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_to_decide_with_fenced_content_fails(self):
+        body = GOOD_ISSUE + "\n## To decide\n\n```\nwhich way?\n```\n"
+        self.assertFalse(evaluate(pull_request(issues=[issue(body)])).passed)
+
+    def test_one_of_two_to_decide_sections_with_content_fails(self):
+        empty = "## To decide\n\n_No response_\n"
+        filled = "## To decide\n\n- Which way?\n"
+        for sections in ((empty, filled), (filled, empty)):
+            with self.subTest(first=sections[0]):
+                body = GOOD_ISSUE + "\n" + sections[0] + "\n" + sections[1]
+                verdict = evaluate(pull_request(issues=[issue(body, number=9)]))
+                self.assertFalse(verdict.passed)
+                self.assertEqual(len(verdict.errors), 1)
+                self.assertIn("Issue #9 still has a `## To decide` section", verdict.errors[0])
+
     def test_level4_to_decide_does_not_count(self):
         body = GOOD_ISSUE + "\n#### To decide\n\n- Which way?\n"
         self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
