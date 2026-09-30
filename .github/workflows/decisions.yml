@@ -28,7 +28,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-  # An edited issue re-runs the check of every open pull request that closes it.
+  # Re-runs the check after an issue edit; README.md says which runs.
   rerun:
     name: rerun
     if: github.event_name == 'issues'

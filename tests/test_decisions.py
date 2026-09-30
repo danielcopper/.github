@@ -606,7 +606,7 @@ WORKFLOW_REF = "octo/repo/.github/workflows/checks.yml@refs/heads/main"
 
 
 class RunIssueTest(unittest.TestCase):
-    def test_reruns_the_latest_completed_run_of_each_open_pull_request(self):
+    def test_reruns_the_completed_run_of_each_open_pull_request(self):
         client = FakeClient(
             graphql_data=issue_data((10, "OPEN", "sha10", REPO), (11, "OPEN", "sha11", REPO)),
             runs={

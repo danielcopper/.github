@@ -4,8 +4,8 @@
 Two modes, one per event the calling workflow runs on:
 
   decisions.py pull-request   evaluate the pull request in GITHUB_EVENT_PATH
-  decisions.py issue          re-run the check of every open pull request that
-                              closes the edited issue in GITHUB_EVENT_PATH
+  decisions.py issue          re-run the check after the edit of the issue in
+                              GITHUB_EVENT_PATH (README.md says which runs)
 
 Python 3 standard library only. The rules live in plain functions over strings
 so they can be tested without the GitHub API; the API sits behind GitHubClient.
@@ -28,7 +28,7 @@ DECISIONS = "Decisions"
 TO_DECIDE = "To decide"
 CLAUDE_MD = "CLAUDE.md"
 CLAUDE_MD_SECTION = "Where decisions live"
-# Issue forms render each field as a level-3 heading; hand-written issues use level 2.
+# Issue forms render each field as a level-3 heading.
 ISSUE_HEADING_LEVELS = (2, 3)
 # What an issue form writes for an optional field left blank.
 NO_RESPONSE = "_No response_"
@@ -198,7 +198,7 @@ def issue_errors(issue: Issue, repository: str) -> list[str]:
             f"Issue {name} has a `## {DECISIONS}` section, but it is empty. Write the "
             "decisions into it (a pointer such as \"See epic #N.\" is enough)."
         )
-    # An empty To decide section, such as a blank issue form field, holds no open questions.
+    # Only a To decide section with content has open questions.
     if section_has_content(issue.body, TO_DECIDE, ISSUE_HEADING_LEVELS):
         errors.append(
             f"Issue {name} still has a `## {TO_DECIDE}` section, so it has open questions. "
