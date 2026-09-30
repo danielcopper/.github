@@ -23,10 +23,12 @@ request must link an issue whose decisions are written down.
 [`.github/workflows/decisions.yml`](.github/workflows/decisions.yml) enforces this. On a pull request it checks, in
 order:
 
-1. A head branch starting with `renovate/` or `release-please--` passes; nothing else is checked.
-2. If `CLAUDE.md` on the base commit has the line `## Where decisions live`, the pull request must keep that line.
-   Repositories without the section are unaffected. The opt-outs below do not skip this rule.
-3. With an opt-out, the check stops here and passes.
+1. If `CLAUDE.md` on the base commit has the line `## Where decisions live`, the pull request must keep that line.
+   Repositories without the section are unaffected. This rule applies to every pull request, including the exempt
+   branches and the opt-outs below.
+2. A head branch starting with `renovate/` or `release-please--` in this repository skips the rules below. A branch
+   from a fork is never exempt, whatever its name.
+3. With an opt-out, the rules below are skipped.
 4. The pull request must link at least one issue (`Closes #N`, `Fixes #N`, `Resolves #N`, or a link set in the
    sidebar). Closing keywords only link an issue when the pull request targets the default branch.
 5. Every linked issue needs a `## Decisions` section with some text in it. A pointer such as "See epic #1896." is

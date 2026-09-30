@@ -132,6 +132,7 @@ class Issue:
 class PullRequest:
     repository: str
     head_branch: str
+    from_fork: bool
     body: str
     labels: list[str]
     base_claude_md: str | None
@@ -149,8 +150,9 @@ class Verdict:
         return not self.errors
 
 
-def is_exempt_branch(branch: str) -> bool:
-    return branch.startswith(EXEMPT_BRANCH_PREFIXES)
+def is_exempt(branch: str, from_fork: bool) -> bool:
+    """Whether a bot branch is exempt from the linked-issue rules. A fork never is."""
+    return not from_fork and branch.startswith(EXEMPT_BRANCH_PREFIXES)
 
 
 def is_opted_out(labels: list[str], body: str) -> bool:
@@ -199,13 +201,15 @@ def issue_errors(issue: Issue, repository: str) -> list[str]:
 def evaluate(pr: PullRequest) -> Verdict:
     """Apply the rules to a pull request, in order."""
     verdict = Verdict()
-    if is_exempt_branch(pr.head_branch):
-        verdict.notices.append(f"Branch {pr.head_branch} is exempt from the decisions check.")
-        return verdict
-
     guard = claude_md_error(pr.base_claude_md, pr.head_claude_md)
     if guard:
         verdict.errors.append(guard)
+
+    if is_exempt(pr.head_branch, pr.from_fork):
+        verdict.notices.append(
+            f"Branch {pr.head_branch} is exempt from the linked-issue rules; only the {CLAUDE_MD} section is checked."
+        )
+        return verdict
 
     if is_opted_out(pr.labels, pr.body):
         verdict.notices.append(
@@ -338,17 +342,21 @@ def load_pull_request(event: dict, client: Client, repository: str) -> PullReque
     """
     pr = event["pull_request"]
     head_branch = pr["head"]["ref"]
-    if is_exempt_branch(head_branch):
-        return PullRequest(repository, head_branch, "", [], None, None, [])
+    from_fork = pr["head"]["repo"]["full_name"] != pr["base"]["repo"]["full_name"]
+    base_claude_md = client.file_at(CLAUDE_MD, pr["base"]["sha"])
+    head_claude_md = client.file_at(CLAUDE_MD, pr["head"]["sha"])
+    if is_exempt(head_branch, from_fork):
+        return PullRequest(repository, head_branch, from_fork, "", [], base_claude_md, head_claude_md, [])
     data = client.graphql(PULL_REQUEST_QUERY, _repo_variables(repository, pr["number"]))
     live = data["repository"]["pullRequest"]
     return PullRequest(
         repository=repository,
         head_branch=head_branch,
+        from_fork=from_fork,
         body=live["body"] or "",
         labels=[label["name"] for label in live["labels"]["nodes"]],
-        base_claude_md=client.file_at(CLAUDE_MD, pr["base"]["sha"]),
-        head_claude_md=client.file_at(CLAUDE_MD, pr["head"]["sha"]),
+        base_claude_md=base_claude_md,
+        head_claude_md=head_claude_md,
         issues=[
             Issue(node["repository"]["nameWithOwner"], node["number"], node["body"] or "")
             for node in live["closingIssuesReferences"]["nodes"]
@@ -360,6 +368,11 @@ def run_pull_request(event: dict, client: Client, repository: str) -> int:
     if "pull_request" not in event:
         _annotate("error", "The decisions workflow checks pull_request events and re-runs on issues events; "
                   "this event has no pull request.")
+        return 1
+    pr = event["pull_request"]
+    if not (pr["head"].get("repo") and pr["base"].get("repo")):
+        _annotate("error", "The pull_request event names no head or base repository, so the check cannot tell "
+                  "whether the pull request comes from a fork.")
         return 1
     verdict = evaluate(load_pull_request(event, client, repository))
     for notice in verdict.notices:

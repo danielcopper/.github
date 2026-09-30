@@ -77,6 +77,7 @@ def pull_request(**overrides):
     default = PullRequest(
         repository=REPO,
         head_branch="feature/thing",
+        from_fork=False,
         body="Closes #1",
         labels=[],
         base_claude_md=None,
@@ -87,19 +88,32 @@ def pull_request(**overrides):
 
 
 class ExemptBranchTest(unittest.TestCase):
-    def test_renovate_branch_passes_without_any_other_check(self):
+    def test_renovate_branch_is_exempt_from_the_issue_rules(self):
+        verdict = evaluate(pull_request(head_branch="renovate/some-dependency", issues=[]))
+        self.assertTrue(verdict.passed)
+        self.assertIn("exempt", verdict.notices[0])
+
+    def test_release_please_branch_is_exempt_from_the_issue_rules(self):
+        verdict = evaluate(pull_request(head_branch="release-please--branches--main", issues=[]))
+        self.assertTrue(verdict.passed)
+
+    def test_bot_branch_from_a_fork_is_not_exempt(self):
+        for branch in ("renovate/x", "release-please--branches--main"):
+            with self.subTest(branch=branch):
+                verdict = evaluate(pull_request(head_branch=branch, from_fork=True, issues=[]))
+                self.assertFalse(verdict.passed)
+                self.assertIn("No linked issue", verdict.errors[0])
+
+    def test_bot_branch_that_removes_the_claude_md_section_fails(self):
         verdict = evaluate(pull_request(
             head_branch="renovate/some-dependency",
             issues=[],
             base_claude_md=CLAUDE_WITH_SECTION,
-            head_claude_md=None,
+            head_claude_md=CLAUDE_WITHOUT_SECTION,
         ))
-        self.assertTrue(verdict.passed)
-        self.assertIn("exempt", verdict.notices[0])
-
-    def test_release_please_branch_passes_without_any_other_check(self):
-        verdict = evaluate(pull_request(head_branch="release-please--branches--main", issues=[]))
-        self.assertTrue(verdict.passed)
+        self.assertFalse(verdict.passed)
+        self.assertEqual(len(verdict.errors), 1)
+        self.assertIn("removes the section `## Where decisions live`", verdict.errors[0])
 
     def test_branch_that_only_contains_the_prefix_is_not_exempt(self):
         verdict = evaluate(pull_request(head_branch="feature/renovate/x", issues=[]))
@@ -426,11 +440,11 @@ class FakeClient:
         self.reruns.append(run_id)
 
 
-def pull_request_event(head_ref="feature/thing"):
+def pull_request_event(head_ref="feature/thing", head_repository=REPO):
     return {"pull_request": {
         "number": 5,
-        "head": {"ref": head_ref, "sha": "head-sha"},
-        "base": {"sha": "base-sha"},
+        "head": {"ref": head_ref, "sha": "head-sha", "repo": {"full_name": head_repository}},
+        "base": {"sha": "base-sha", "repo": {"full_name": REPO}},
     }}
 
 
@@ -474,10 +488,32 @@ class RunPullRequestTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("::notice::Opted out", output)
 
-    def test_exempt_branch_makes_no_api_call(self):
+    def test_exempt_branch_skips_the_pull_request_query(self):
         client = FakeClient()
         code, _ = run_quietly(decisions.run_pull_request, pull_request_event("renovate/x"), client, REPO)
         self.assertEqual(code, 0)
+        self.assertEqual(client.graphql_calls, [])
+
+    def test_exempt_branch_still_runs_the_claude_md_guard(self):
+        client = FakeClient(files={("CLAUDE.md", "base-sha"): CLAUDE_WITH_SECTION})
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event("renovate/x"), client, REPO)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::This pull request deletes CLAUDE.md", output)
+
+    def test_bot_branch_from_a_fork_gets_the_issue_rules(self):
+        client = FakeClient(graphql_data=pull_request_data())
+        event = pull_request_event("renovate/x", head_repository="someone/repo")
+        code, output = run_quietly(decisions.run_pull_request, event, client, REPO)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::No linked issue", output)
+
+    def test_event_without_head_repository_fails(self):
+        event = pull_request_event("renovate/x")
+        event["pull_request"]["head"]["repo"] = None
+        client = FakeClient()
+        code, output = run_quietly(decisions.run_pull_request, event, client, REPO)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::The pull_request event names no head or base repository", output)
         self.assertEqual(client.graphql_calls, [])
 
     def test_event_without_pull_request_fails(self):
