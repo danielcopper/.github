@@ -1,9 +1,13 @@
 import contextlib
 import dataclasses
+import email.message
 import io
+import json
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -643,6 +647,63 @@ class RunIssueTest(unittest.TestCase):
         self.assertEqual(client.reruns, [])
         self.assertIn("Pull request #10 has no checks.yml run", output)
 
+
+
+class FakeResponse:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self):
+        return self.payload
+
+
+def http_error(code):
+    return urllib.error.HTTPError("https://api.example/x", code, "status", email.message.Message(), None)
+
+
+class GitHubClientTest(unittest.TestCase):
+    def setUp(self):
+        self.client = decisions.GitHubClient("token", REPO, "https://api.example", "https://api.example/graphql")
+
+    def test_file_at_returns_the_file_text(self):
+        with mock.patch.object(decisions.urllib.request, "urlopen", return_value=FakeResponse(b"# Project\n")):
+            self.assertEqual(self.client.file_at("CLAUDE.md", "sha"), "# Project\n")
+
+    def test_file_at_returns_none_when_the_file_is_absent(self):
+        with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=http_error(404)):
+            self.assertIsNone(self.client.file_at("CLAUDE.md", "sha"))
+
+    def test_file_at_raises_on_a_server_error(self):
+        with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=http_error(500)):
+            with self.assertRaises(urllib.error.HTTPError):
+                self.client.file_at("CLAUDE.md", "sha")
+
+    def test_file_at_raises_when_access_is_refused(self):
+        with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=http_error(403)):
+            with self.assertRaises(urllib.error.HTTPError):
+                self.client.file_at("CLAUDE.md", "sha")
+
+    def test_graphql_returns_the_data(self):
+        body = json.dumps({"data": {"repository": {}}}).encode()
+        with mock.patch.object(decisions.urllib.request, "urlopen", return_value=FakeResponse(body)):
+            self.assertEqual(self.client.graphql("query", {}), {"repository": {}})
+
+    def test_graphql_raises_on_errors(self):
+        body = json.dumps({"data": None, "errors": [{"message": "Resource not accessible by integration"}]}).encode()
+        with mock.patch.object(decisions.urllib.request, "urlopen", return_value=FakeResponse(body)):
+            with self.assertRaisesRegex(RuntimeError, "Resource not accessible by integration"):
+                self.client.graphql("query", {})
+
+    def test_graphql_raises_on_an_http_error(self):
+        with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=http_error(502)):
+            with self.assertRaises(urllib.error.HTTPError):
+                self.client.graphql("query", {})
 
 if __name__ == "__main__":
     unittest.main()
