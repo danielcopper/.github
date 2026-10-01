@@ -1,0 +1,53 @@
+name: decisions
+
+# Called from a repository's workflow on pull_request and issues events; see README.md.
+on:
+  workflow_call:
+
+jobs:
+  # Judges the pull request. Runs for every event except issues, so a caller
+  # wired to an unsupported event fails loudly instead of skipping.
+  decisions:
+    name: decisions
+    if: github.event_name != 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      # The checker comes from the commit of this repository the caller pinned.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: scripts
+      - name: Check the pull request's decisions
+        run: python3 scripts/decisions.py pull-request
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # Re-runs the check after an issue edit; README.md says which runs.
+  rerun:
+    name: rerun
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: scripts
+      - name: Re-run the check of the pull requests that close the issue
+        run: python3 scripts/decisions.py issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # In a called workflow the github context belongs to the caller, so
+          # this names the caller's workflow file, whose runs are re-run.
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
