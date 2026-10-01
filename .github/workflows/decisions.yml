@@ -16,17 +16,24 @@ jobs:
       issues: read
       pull-requests: read
     steps:
-      # The checker comes from the commit of this repository the caller pinned.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The checker and the shared Planned change form come from the commit of
+      # this repository the caller pinned.
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
-          sparse-checkout: scripts
+          sparse-checkout: |
+            scripts
+            .github/ISSUE_TEMPLATE
       - name: Check the pull request's decisions
         run: python3 scripts/decisions.py pull-request
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # A copy of this form in the caller must equal it byte for byte.
+          SHARED_FORM: .github/ISSUE_TEMPLATE/planned_change.yml
+          SHARED_FORM_COMMIT: ${{ steps.checkout.outputs.commit }}
 
   # Re-runs the check after an issue edit; README.md says which runs.
   rerun:

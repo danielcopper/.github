@@ -12,8 +12,8 @@ GitHub uses these for every repository of this account that has no copy of its o
 - [`.github/pull_request_template.md`](.github/pull_request_template.md) — a prose summary, the final decisions, and
   `Closes #`.
 
-A repository with its own `.github/ISSUE_TEMPLATE/` folder uses none of the default issue templates, so it needs its
-own copy of Planned change.
+A repository with its own `.github/ISSUE_TEMPLATE/` folder gets none of the shared issue templates, so it carries a
+copy of Planned change; rule 2 of the `decisions` check keeps that copy identical.
 
 ## The `decisions` check
 
@@ -26,14 +26,18 @@ order:
 1. If `CLAUDE.md` on the base commit has the heading `## Where decisions live`, the pull request must keep it.
    Repositories without the section are unaffected. This rule applies to every pull request, including the exempt
    branches and the opt-outs below.
-2. A head branch starting with `renovate/` or `release-please--` in the pull request's own repository skips the rules
+2. If the head commit has `.github/ISSUE_TEMPLATE/planned_change.yml`, it must be byte-identical with the shared form
+   at the commit the caller pinned (see [Default community files](#default-community-files)). Repositories without
+   the file are unaffected. Like rule 1, it applies to every pull request, so a bot's bump of the pin shows an
+   outdated copy.
+3. A head branch starting with `renovate/` or `release-please--` in the pull request's own repository skips the rules
    below. A branch from a fork is never exempt, whatever its name, even after the fork is deleted.
-3. With an opt-out, the rules below are skipped.
-4. The pull request must link at least one issue (`Closes #N`, `Fixes #N`, `Resolves #N`, or a link set in the
+4. With an opt-out, the rules below are skipped.
+5. The pull request must link at least one issue (`Closes #N`, `Fixes #N`, `Resolves #N`, or a link set in the
    sidebar). Closing keywords only link an issue when the pull request targets the default branch.
-5. Every linked issue needs a `## Decisions` section with some text in it. A pointer such as "See epic #1896." is
+6. Every linked issue needs a `## Decisions` section with some text in it. A pointer such as "See epic #1896." is
    enough.
-6. No linked issue may still have a `## To decide` section with text in it. An empty one holds no open questions.
+7. No linked issue may still have a `## To decide` section with text in it. An empty one holds no open questions.
 
 `_No response_`, which an issue form writes for a field left blank, does not count as text.
 
@@ -73,14 +77,14 @@ jobs:
   decisions:
     permissions:
       actions: write        # re-run pull request checks after an issue edit
-      contents: read        # read CLAUDE.md
+      contents: read        # read CLAUDE.md and the Planned change copy
       issues: read          # read the linked issues
       pull-requests: read   # read the pull request, its labels and linked issues
     uses: danielcopper/.github/.github/workflows/decisions.yml@<full-commit-sha>
 ```
 
-- Pin `<full-commit-sha>` to a full commit SHA of this repository, not a branch or tag. The checker script is
-  checked out at that same commit.
+- Pin `<full-commit-sha>` to a full commit SHA of this repository, not a branch or tag. The checker script and the
+  shared Planned change form are checked out at that same commit.
 - A called workflow can only reduce the token permissions its caller grants, so the caller grants all four. Each
   job of the reusable workflow keeps only what it needs; `actions: write` is used only on issue edits.
 - Issue events run the workflow file from the default branch, so re-runs work once the caller is merged there.

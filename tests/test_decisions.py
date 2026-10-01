@@ -3,7 +3,9 @@ import dataclasses
 import email.message
 import io
 import json
+import os
 import sys
+import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
@@ -12,7 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import decisions  # noqa: E402
-from decisions import Issue, PullRequest, evaluate  # noqa: E402
+from decisions import PLANNED_CHANGE, Issue, PullRequest, SharedForm, evaluate  # noqa: E402
 
 REPO = "octo/repo"
 
@@ -72,6 +74,24 @@ CLAUDE_WITHOUT_SECTION = """\
 Run them.
 """
 
+SHARED_FORM = """\
+name: Planned change
+body:
+  - type: textarea
+    attributes:
+      label: Out of scope
+"""
+
+OUTDATED_FORM = """\
+name: Planned change
+body:
+  - type: textarea
+    attributes:
+      label: Done when
+"""
+
+SHARED = SharedForm(SHARED_FORM, "abcdef1234567890abcdef1234567890abcdef12")
+
 
 def issue(body, number=1, repository=REPO):
     return Issue(repository=repository, number=number, body=body)
@@ -86,6 +106,8 @@ def pull_request(**overrides):
         labels=[],
         base_claude_md=None,
         head_claude_md=None,
+        head_planned_change=None,
+        shared_planned_change=SHARED,
         issues=[issue(GOOD_ISSUE)],
     )
     return dataclasses.replace(default, **overrides)
@@ -176,6 +198,66 @@ class ClaudeMdGuardTest(unittest.TestCase):
         head = "## Where decisions live now\n"
         verdict = evaluate(pull_request(base_claude_md=CLAUDE_WITH_SECTION, head_claude_md=head))
         self.assertFalse(verdict.passed)
+
+
+class PlannedChangeCopyTest(unittest.TestCase):
+    def test_identical_copy_passes(self):
+        self.assertTrue(evaluate(pull_request(head_planned_change=SHARED_FORM)).passed)
+
+    def test_absent_copy_passes(self):
+        self.assertTrue(evaluate(pull_request(head_planned_change=None)).passed)
+
+    def test_differing_copy_fails_and_says_to_copy_the_shared_form(self):
+        verdict = evaluate(pull_request(head_planned_change=OUTDATED_FORM))
+        self.assertFalse(verdict.passed)
+        self.assertEqual(verdict.errors, [
+            ".github/ISSUE_TEMPLATE/planned_change.yml differs from the shared form at "
+            "danielcopper/.github@abcdef1. Copy the shared file over it unchanged."
+        ])
+
+    def test_copy_with_other_line_endings_fails(self):
+        verdict = evaluate(pull_request(head_planned_change=SHARED_FORM.replace("\n", "\r\n")))
+        self.assertFalse(verdict.passed)
+
+    def test_copy_without_the_final_newline_fails(self):
+        verdict = evaluate(pull_request(head_planned_change=SHARED_FORM.rstrip("\n")))
+        self.assertFalse(verdict.passed)
+
+    def test_exempt_bot_branch_still_checks_the_copy(self):
+        for branch in ("renovate/x", "release-please--branches--main"):
+            with self.subTest(branch=branch):
+                verdict = evaluate(pull_request(head_branch=branch, issues=[], head_planned_change=OUTDATED_FORM))
+                self.assertFalse(verdict.passed)
+                self.assertEqual(len(verdict.errors), 1)
+                self.assertIn("differs from the shared form", verdict.errors[0])
+                self.assertIn("exempt", verdict.notices[0])
+
+    def test_opt_out_still_checks_the_copy(self):
+        for overrides in ({"labels": ["no-decisions"]}, {"body": "decisions: none"}):
+            with self.subTest(overrides=overrides):
+                verdict = evaluate(pull_request(issues=[], head_planned_change=OUTDATED_FORM, **overrides))
+                self.assertFalse(verdict.passed)
+                self.assertEqual(len(verdict.errors), 1)
+                self.assertIn("differs from the shared form", verdict.errors[0])
+                self.assertIn("Opted out", verdict.notices[0])
+
+    def test_claude_md_guard_and_copy_rule_both_report(self):
+        verdict = evaluate(pull_request(
+            base_claude_md=CLAUDE_WITH_SECTION,
+            head_claude_md=None,
+            head_planned_change=OUTDATED_FORM,
+        ))
+        self.assertEqual(len(verdict.errors), 2)
+
+
+class ReadSharedFormTest(unittest.TestCase):
+    def test_reads_the_file_with_its_line_endings_and_the_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "planned_change.yml")
+            with open(path, "wb") as handle:
+                handle.write(b"name: Planned change\r\nbody: []\n")
+            shared = decisions.read_shared_form(path, "0123456789")
+        self.assertEqual(shared, SharedForm("name: Planned change\r\nbody: []\n", "0123456789"))
 
 
 class OptOutTest(unittest.TestCase):
@@ -550,46 +632,68 @@ class RunPullRequestTest(unittest.TestCase):
             graphql_data=pull_request_data(issues=[(1, GOOD_ISSUE)]),
             files={("CLAUDE.md", "base-sha"): CLAUDE_WITH_SECTION, ("CLAUDE.md", "head-sha"): CLAUDE_WITHOUT_SECTION},
         )
-        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO)
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::This pull request removes the section", output)
         self.assertEqual(client.graphql_calls, [{"owner": "octo", "name": "repo", "number": 5}])
 
     def test_passing_pull_request_exits_zero(self):
         client = FakeClient(graphql_data=pull_request_data(issues=[(1, GOOD_ISSUE)]))
-        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO)
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
         self.assertEqual(code, 0)
         self.assertNotIn("::error::", output)
 
     def test_live_label_opts_out(self):
         client = FakeClient(graphql_data=pull_request_data(labels=["no-decisions"]))
-        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO)
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
         self.assertEqual(code, 0)
         self.assertIn("::notice::Opted out", output)
 
     def test_exempt_branch_skips_the_pull_request_query(self):
         client = FakeClient()
-        code, _ = run_quietly(decisions.run_pull_request, pull_request_event("renovate/x"), client, REPO)
+        code, _ = run_quietly(decisions.run_pull_request, pull_request_event("renovate/x"), client, REPO, SHARED)
         self.assertEqual(code, 0)
         self.assertEqual(client.graphql_calls, [])
 
     def test_exempt_branch_still_runs_the_claude_md_guard(self):
         client = FakeClient(files={("CLAUDE.md", "base-sha"): CLAUDE_WITH_SECTION})
-        code, output = run_quietly(decisions.run_pull_request, pull_request_event("renovate/x"), client, REPO)
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event("renovate/x"), client, REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::This pull request deletes CLAUDE.md", output)
+
+    def test_reads_the_planned_change_copy_at_the_head_commit(self):
+        cases = (
+            ("head differs", OUTDATED_FORM, SHARED_FORM, 1),
+            ("base differs", SHARED_FORM, OUTDATED_FORM, 0),
+        )
+        for name, head, base, expected in cases:
+            with self.subTest(name):
+                client = FakeClient(
+                    graphql_data=pull_request_data(issues=[(1, GOOD_ISSUE)]),
+                    files={(PLANNED_CHANGE, "head-sha"): head, (PLANNED_CHANGE, "base-sha"): base},
+                )
+                code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
+                self.assertEqual(code, expected)
+                self.assertEqual("::error::.github/ISSUE_TEMPLATE/planned_change.yml differs" in output, bool(expected))
+
+    def test_exempt_branch_still_checks_the_planned_change_copy(self):
+        client = FakeClient(files={(PLANNED_CHANGE, "head-sha"): OUTDATED_FORM})
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event("renovate/x"), client, REPO, SHARED)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::.github/ISSUE_TEMPLATE/planned_change.yml differs from the shared form", output)
+        self.assertEqual(client.graphql_calls, [])
 
     def test_bot_branch_from_a_fork_gets_the_issue_rules(self):
         client = FakeClient(graphql_data=pull_request_data())
         event = pull_request_event("renovate/x", head_repository="someone/repo")
-        code, output = run_quietly(decisions.run_pull_request, event, client, REPO)
+        code, output = run_quietly(decisions.run_pull_request, event, client, REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::No linked issue", output)
 
     def test_deleted_fork_bot_branch_is_not_exempt(self):
         event = deleted_fork_event("renovate/x")
         client = FakeClient(graphql_data=pull_request_data())
-        code, output = run_quietly(decisions.run_pull_request, event, client, REPO)
+        code, output = run_quietly(decisions.run_pull_request, event, client, REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::No linked issue", output)
         self.assertNotIn("exempt", output)
@@ -599,13 +703,13 @@ class RunPullRequestTest(unittest.TestCase):
             graphql_data=pull_request_data(body="decisions: none"),
             files={("CLAUDE.md", "base-sha"): CLAUDE_WITH_SECTION, ("CLAUDE.md", "head-sha"): CLAUDE_WITH_SECTION},
         )
-        code, output = run_quietly(decisions.run_pull_request, deleted_fork_event(), client, REPO)
+        code, output = run_quietly(decisions.run_pull_request, deleted_fork_event(), client, REPO, SHARED)
         self.assertEqual(code, 0)
         self.assertIn("::notice::Opted out", output)
 
     def test_deleted_fork_gets_the_issue_rules(self):
         client = FakeClient(graphql_data=pull_request_data(issues=[(1, "## Wanted\n\nY\n")]))
-        code, output = run_quietly(decisions.run_pull_request, deleted_fork_event(), client, REPO)
+        code, output = run_quietly(decisions.run_pull_request, deleted_fork_event(), client, REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::Issue #1 has no `## Decisions` section", output)
 
@@ -613,13 +717,13 @@ class RunPullRequestTest(unittest.TestCase):
         event = pull_request_event()
         del event["pull_request"]["base"]["repo"]
         client = FakeClient()
-        code, output = run_quietly(decisions.run_pull_request, event, client, REPO)
+        code, output = run_quietly(decisions.run_pull_request, event, client, REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::The pull_request event names no base repository", output)
         self.assertEqual(client.graphql_calls, [])
 
     def test_event_without_pull_request_fails(self):
-        code, output = run_quietly(decisions.run_pull_request, {"push": {}}, FakeClient(), REPO)
+        code, output = run_quietly(decisions.run_pull_request, {"push": {}}, FakeClient(), REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::", output)
 
@@ -693,6 +797,42 @@ class FakeResponse:
 
 def http_error(code):
     return urllib.error.HTTPError("https://api.example/x", code, "status", email.message.Message(), None)
+
+
+class PlannedChangeOverTheApiTest(unittest.TestCase):
+    """The copy is read like CLAUDE.md: 404 means absent, any other error fails the check."""
+
+    def run_with(self, planned_change_response):
+        def urlopen(request, timeout):
+            if request.full_url.endswith("/graphql"):
+                return FakeResponse(json.dumps({"data": pull_request_data(issues=[(1, GOOD_ISSUE)])}).encode())
+            if f"/contents/{PLANNED_CHANGE}?ref=head-sha" in request.full_url:
+                if isinstance(planned_change_response, Exception):
+                    raise planned_change_response
+                return FakeResponse(planned_change_response)
+            raise http_error(404)
+
+        client = decisions.GitHubClient("token", REPO, "https://api.example", "https://api.example/graphql")
+        with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=urlopen):
+            return run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
+
+    def test_identical_copy_passes(self):
+        code, _ = self.run_with(SHARED_FORM.encode())
+        self.assertEqual(code, 0)
+
+    def test_differing_copy_fails(self):
+        code, output = self.run_with(OUTDATED_FORM.encode())
+        self.assertEqual(code, 1)
+        self.assertIn("::error::.github/ISSUE_TEMPLATE/planned_change.yml differs", output)
+
+    def test_404_means_the_copy_is_absent(self):
+        code, output = self.run_with(http_error(404))
+        self.assertEqual(code, 0)
+        self.assertNotIn("::error::", output)
+
+    def test_server_error_fails_the_check(self):
+        with self.assertRaises(urllib.error.HTTPError):
+            self.run_with(http_error(500))
 
 
 class GitHubClientTest(unittest.TestCase):
