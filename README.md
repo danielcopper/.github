@@ -17,8 +17,9 @@ copy of Planned change; rule 2 of the `decisions` check keeps that copy identica
 
 ## The `decisions` check
 
-An issue's open questions sit under `## To decide`. Once they are answered, the section becomes `## Decisions`. A pull
-request must link an issue whose decisions are written down.
+An issue's open questions sit under `## To decide`, one checkbox each. Once a question is answered under `## Decisions`,
+it is checked off. A pull request must link an issue whose decisions are written down and whose questions are all
+checked off.
 
 [`.github/workflows/decisions.yml`](.github/workflows/decisions.yml) enforces this. On a pull request it checks, in
 order:
@@ -37,7 +38,8 @@ order:
    sidebar). Closing keywords only link an issue when the pull request targets the default branch.
 6. Every linked issue needs a `## Decisions` section with some text in it. A pointer such as "See epic #1896." is
    enough.
-7. No linked issue may still have a `## To decide` section with text in it. An empty one holds no open questions.
+7. No linked issue may have an open question: under `## To decide`, every item is a checked task-list item (`- [x]`);
+   an unchecked item or any other text there counts as open. An empty section holds no open questions.
 
 `_No response_`, which an issue form writes for a field left blank, does not count as text.
 

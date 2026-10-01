@@ -6,8 +6,8 @@ Thanks for your interest. These repositories are maintained by one person, so th
 
 1. Open an issue first. For a change, use the **Planned change** template. Typo fixes and dependency bumps don't
    need an issue.
-2. Open questions go under `## To decide`. I answer them in the issue, and the section then becomes `## Decisions`.
-   Please don't start implementing while `## To decide` is still there — the PR check will fail.
+2. Open questions go under `## To decide`, one checkbox each. I answer them under `## Decisions` and check each
+   question off; a pull request merges only once every question is checked.
 
 ## The pull request
 

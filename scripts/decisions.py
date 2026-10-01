@@ -44,6 +44,8 @@ _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 _ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
 _CLOSING_SEQUENCE = re.compile(r"(?:^|[ \t]+)#+$")
+# A task-list item such as `- [ ] Which way?` or `* [x] Settled.`; group 1 is the box's mark.
+_TASK_ITEM = re.compile(r"^[ \t]*[-*+][ \t]+\[([ xX])\](?:[ \t]|$)")
 
 
 # --- Markdown -------------------------------------------------------------
@@ -128,6 +130,42 @@ def section_has_content(text: str, title: str, levels: tuple[int, ...]) -> bool:
         if open_level is not None and _is_content(line):
             return True
     return False
+
+
+def open_questions(text: str) -> list[str]:
+    """The lines of the `To decide` sections that hold an open question.
+
+    Sections are found as in section_has_content. Inside one, a checked
+    task-list item (`- [x]`, `- [X]`, also with `*` or `+`) is settled, and so
+    are the indented lines that follow it. An unchecked item, and every other
+    line with text, is open. Blank lines and `_No response_` are neither.
+    """
+    result: list[str] = []
+    open_level: int | None = None
+    in_item = False
+    for raw, line in zip(text.splitlines(), _unfenced_lines(text)):
+        heading = _heading(line)
+        if heading is not None and open_level is not None and heading[0] <= open_level:
+            open_level = None
+        if heading is not None and open_level is None:
+            if heading[0] in ISSUE_HEADING_LEVELS and heading[1] == TO_DECIDE:
+                open_level = heading[0]
+                in_item = False
+            continue
+        stripped = raw.strip()
+        if open_level is None or not stripped or stripped == NO_RESPONSE:
+            continue
+        item = _TASK_ITEM.match(raw)
+        if item:
+            in_item = True
+            if item.group(1) == " ":
+                result.append(stripped)
+        elif in_item and raw[0] in " \t":
+            continue
+        else:
+            in_item = False
+            result.append(stripped)
+    return result
 
 
 # --- Rules ----------------------------------------------------------------
@@ -221,11 +259,12 @@ def issue_errors(issue: Issue, repository: str) -> list[str]:
             f"Issue {name} has a `## {DECISIONS}` section, but it is empty. Write the "
             "decisions into it (a pointer such as \"See epic #N.\" is enough)."
         )
-    # Only a To decide section with content has open questions.
-    if section_has_content(issue.body, TO_DECIDE, ISSUE_HEADING_LEVELS):
+    questions = open_questions(issue.body)
+    if questions:
+        listed = ", ".join(f'"{question}"' for question in questions)
         errors.append(
-            f"Issue {name} still has a `## {TO_DECIDE}` section, so it has open questions. "
-            f"Settle them, then rename the section to `## {DECISIONS}`."
+            f"Issue {name} still has a `## {TO_DECIDE}` section with open questions: {listed}. "
+            f"Answer each under `## {DECISIONS}` and check it off (`- [x]`)."
         )
     return errors
 

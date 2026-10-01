@@ -543,6 +543,65 @@ class ToDecideTest(unittest.TestCase):
         self.assertTrue(evaluate(pull_request(issues=[issue(body)])).passed)
 
 
+class ToDecideTaskListTest(unittest.TestCase):
+    """Under To decide, only checked task-list items are settled."""
+
+    def verdict(self, to_decide, heading="## To decide"):
+        return evaluate(pull_request(issues=[issue(GOOD_ISSUE + "\n" + heading + "\n\n" + to_decide, number=9)]))
+
+    def test_all_items_checked_passes(self):
+        self.assertTrue(self.verdict("- [x] Which way? → D1\n- [x] How fast? → D2\n").passed)
+
+    def test_one_unchecked_item_fails_and_names_it(self):
+        verdict = self.verdict("- [x] Which way? → D1\n- [ ] How fast?\n")
+        self.assertFalse(verdict.passed)
+        self.assertEqual(verdict.errors, [
+            'Issue #9 still has a `## To decide` section with open questions: "- [ ] How fast?". '
+            "Answer each under `## Decisions` and check it off (`- [x]`)."
+        ])
+
+    def test_checked_item_with_indented_continuation_passes(self):
+        for continuation in ("  → D1, see the comment.\n", "\t→ D1.\n", "\n  A second paragraph.\n"):
+            with self.subTest(continuation=continuation):
+                self.assertTrue(self.verdict("- [x] Which way?\n" + continuation + "- [x] How fast?\n").passed)
+
+    def test_intro_prose_line_fails(self):
+        verdict = self.verdict("These are settled:\n\n- [x] Which way?\n")
+        self.assertFalse(verdict.passed)
+        self.assertIn('"These are settled:"', verdict.errors[0])
+
+    def test_unindented_line_after_a_checked_item_fails(self):
+        self.assertFalse(self.verdict("- [x] Which way?\nAnd one more thing.\n").passed)
+
+    def test_indented_line_without_an_item_fails(self):
+        self.assertFalse(self.verdict("  Which way?\n").passed)
+
+    def test_plain_list_item_fails(self):
+        self.assertFalse(self.verdict("- [x] Which way?\n- How fast?\n").passed)
+
+    def test_no_response_passes(self):
+        self.assertTrue(self.verdict("_No response_\n", heading="### To decide").passed)
+
+    def test_star_and_plus_markers(self):
+        for marker in ("*", "+"):
+            with self.subTest(marker=marker):
+                self.assertTrue(self.verdict(f"{marker} [x] Which way?\n").passed)
+                self.assertFalse(self.verdict(f"{marker} [ ] Which way?\n").passed)
+
+    def test_uppercase_x_is_checked(self):
+        self.assertTrue(self.verdict("- [X] Which way?\n").passed)
+
+    def test_unchecked_item_nested_under_a_checked_item_fails(self):
+        self.assertFalse(self.verdict("- [x] Which way?\n  - [ ] And which detail?\n").passed)
+
+    def test_every_open_line_is_named(self):
+        verdict = self.verdict("- [ ] Which way?\n- [x] Settled.\n- [ ] How fast?\n")
+        self.assertIn('"- [ ] Which way?", "- [ ] How fast?"', verdict.errors[0])
+
+    def test_box_without_a_space_before_the_text_is_not_an_item(self):
+        self.assertFalse(self.verdict("- [x]Which way?\n").passed)
+
+
 class MultipleIssuesTest(unittest.TestCase):
     def test_every_issue_must_pass(self):
         verdict = evaluate(pull_request(issues=[
