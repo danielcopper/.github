@@ -26,8 +26,8 @@ order:
 1. If `CLAUDE.md` on the base commit has the heading `## Where decisions live`, the pull request must keep it.
    Repositories without the section are unaffected. This rule applies to every pull request, including the exempt
    branches and the opt-outs below.
-2. A head branch starting with `renovate/` or `release-please--` in this repository skips the rules below. A branch
-   from a fork is never exempt, whatever its name.
+2. A head branch starting with `renovate/` or `release-please--` in the pull request's own repository skips the rules
+   below. A branch from a fork is never exempt, whatever its name, even after the fork is deleted.
 3. With an opt-out, the rules below are skipped.
 4. The pull request must link at least one issue (`Closes #N`, `Fixes #N`, `Resolves #N`, or a link set in the
    sidebar). Closing keywords only link an issue when the pull request targets the default branch.

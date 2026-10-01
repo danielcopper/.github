@@ -351,7 +351,9 @@ def load_pull_request(event: dict, client: Client, repository: str) -> PullReque
     """
     pr = event["pull_request"]
     head_branch = pr["head"]["ref"]
-    from_fork = pr["head"]["repo"]["full_name"] != pr["base"]["repo"]["full_name"]
+    head_repo = pr["head"]["repo"]
+    # GitHub sends a null head repository once the fork is deleted; it is still a fork.
+    from_fork = head_repo is None or head_repo["full_name"] != pr["base"]["repo"]["full_name"]
     base_claude_md = client.file_at(CLAUDE_MD, pr["base"]["sha"])
     head_claude_md = client.file_at(CLAUDE_MD, pr["head"]["sha"])
     if is_exempt(head_branch, from_fork):
@@ -379,9 +381,9 @@ def run_pull_request(event: dict, client: Client, repository: str) -> int:
                   "this event has no pull request.")
         return 1
     pr = event["pull_request"]
-    if not (pr["head"].get("repo") and pr["base"].get("repo")):
-        _annotate("error", "The pull_request event names no head or base repository, so the check cannot tell "
-                  "whether the pull request comes from a fork.")
+    if not pr["base"].get("repo"):
+        _annotate("error", "The pull_request event names no base repository, so the check cannot tell whether the "
+                  "pull request comes from a fork.")
         return 1
     verdict = evaluate(load_pull_request(event, client, repository))
     for notice in verdict.notices:

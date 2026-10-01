@@ -521,6 +521,12 @@ def pull_request_event(head_ref="feature/thing", head_repository=REPO):
     }}
 
 
+def deleted_fork_event(head_ref="feature/thing"):
+    event = pull_request_event(head_ref)
+    event["pull_request"]["head"]["repo"] = None
+    return event
+
+
 def pull_request_data(body="Closes #1", labels=(), issues=()):
     return {"repository": {"pullRequest": {
         "body": body,
@@ -580,13 +586,36 @@ class RunPullRequestTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("::error::No linked issue", output)
 
-    def test_event_without_head_repository_fails(self):
-        event = pull_request_event("renovate/x")
-        event["pull_request"]["head"]["repo"] = None
+    def test_deleted_fork_bot_branch_is_not_exempt(self):
+        event = deleted_fork_event("renovate/x")
+        client = FakeClient(graphql_data=pull_request_data())
+        code, output = run_quietly(decisions.run_pull_request, event, client, REPO)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::No linked issue", output)
+        self.assertNotIn("exempt", output)
+
+    def test_deleted_fork_can_opt_out(self):
+        client = FakeClient(
+            graphql_data=pull_request_data(body="decisions: none"),
+            files={("CLAUDE.md", "base-sha"): CLAUDE_WITH_SECTION, ("CLAUDE.md", "head-sha"): CLAUDE_WITH_SECTION},
+        )
+        code, output = run_quietly(decisions.run_pull_request, deleted_fork_event(), client, REPO)
+        self.assertEqual(code, 0)
+        self.assertIn("::notice::Opted out", output)
+
+    def test_deleted_fork_gets_the_issue_rules(self):
+        client = FakeClient(graphql_data=pull_request_data(issues=[(1, "## Wanted\n\nY\n")]))
+        code, output = run_quietly(decisions.run_pull_request, deleted_fork_event(), client, REPO)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::Issue #1 has no `## Decisions` section", output)
+
+    def test_event_without_base_repository_fails(self):
+        event = pull_request_event()
+        del event["pull_request"]["base"]["repo"]
         client = FakeClient()
         code, output = run_quietly(decisions.run_pull_request, event, client, REPO)
         self.assertEqual(code, 1)
-        self.assertIn("::error::The pull_request event names no head or base repository", output)
+        self.assertIn("::error::The pull_request event names no base repository", output)
         self.assertEqual(client.graphql_calls, [])
 
     def test_event_without_pull_request_fails(self):
