@@ -677,7 +677,6 @@ class RunIssueTest(unittest.TestCase):
         self.assertIn("Pull request #10 has no checks.yml run", output)
 
 
-
 class FakeResponse:
     def __init__(self, payload: bytes):
         self.payload = payload
@@ -733,6 +732,7 @@ class GitHubClientTest(unittest.TestCase):
         with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=http_error(502)):
             with self.assertRaises(urllib.error.HTTPError):
                 self.client.graphql("query", {})
+
 
 if __name__ == "__main__":
     unittest.main()
