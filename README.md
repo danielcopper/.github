@@ -8,7 +8,7 @@ GitHub uses these for every repository of this account that has no copy of its o
 
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how an issue becomes a pull request.
 - [`.github/ISSUE_TEMPLATE/planned_change.yml`](.github/ISSUE_TEMPLATE/planned_change.yml) — the **Planned change**
-  issue form: Today, Wanted, To decide, Done when.
+  issue form: Today, Wanted, To decide, Done when, Out of scope.
 - [`.github/pull_request_template.md`](.github/pull_request_template.md) — a prose summary, the final decisions, and
   `Closes #`.
 
