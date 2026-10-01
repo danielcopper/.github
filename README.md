@@ -12,8 +12,8 @@ GitHub uses these for every repository of this account that has no copy of its o
 - [`.github/pull_request_template.md`](.github/pull_request_template.md) — a prose summary, the final decisions, and
   `Closes #`.
 
-A repository with its own `.github/ISSUE_TEMPLATE/` folder uses none of the default issue templates, so it needs its
-own copy of Planned change.
+A repository with its own `.github/ISSUE_TEMPLATE/` folder gets none of the shared issue templates, so it carries a
+copy of Planned change; rule 2 of the `decisions` check keeps that copy identical.
 
 ## The `decisions` check
 
@@ -27,9 +27,9 @@ order:
    Repositories without the section are unaffected. This rule applies to every pull request, including the exempt
    branches and the opt-outs below.
 2. If the head commit has `.github/ISSUE_TEMPLATE/planned_change.yml`, it must be byte-identical with the shared form
-   at the commit the caller pinned. A repository with its own `ISSUE_TEMPLATE` folder gets none of the shared issue
-   templates, so it carries a copy, and this rule keeps the copy identical. Repositories without the file are
-   unaffected. Like rule 1, it applies to every pull request, so a bot's bump of the pin shows an outdated copy.
+   at the commit the caller pinned (see [Default community files](#default-community-files)). Repositories without
+   the file are unaffected. Like rule 1, it applies to every pull request, so a bot's bump of the pin shows an
+   outdated copy.
 3. A head branch starting with `renovate/` or `release-please--` in the pull request's own repository skips the rules
    below. A branch from a fork is never exempt, whatever its name, even after the fork is deleted.
 4. With an opt-out, the rules below are skipped.
