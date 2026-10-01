@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+import typing
 import unittest
 import urllib.error
 from pathlib import Path
@@ -14,7 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import decisions  # noqa: E402
-from decisions import PLANNED_CHANGE, Issue, PullRequest, SharedForm, evaluate  # noqa: E402
+from decisions import PLANNED_CHANGE, Adr, Issue, PullRequest, SharedForm, evaluate  # noqa: E402
 
 REPO = "octo/repo"
 
@@ -108,6 +109,7 @@ def pull_request(**overrides):
         head_claude_md=None,
         head_planned_change=None,
         shared_planned_change=SHARED,
+        adrs=[],
         issues=[issue(GOOD_ISSUE)],
     )
     return dataclasses.replace(default, **overrides)
@@ -622,6 +624,334 @@ class MultipleIssuesTest(unittest.TestCase):
         self.assertIn("Issue octo/other#4", verdict.errors[0])
 
 
+ACCEPTED = "status: accepted\ndecided: 2026-09-01\nupdated: 2026-09-01\n"
+DECISION_BODY = "# Use one queue\n\nOne queue, not one per worker: it keeps the order.\n"
+OLD_BODY = "# Use one queue\n\n## Status\n\nAccepted.\n"
+
+
+def adr(number, front=None, body=DECISION_BODY, slug="decision"):
+    """An ADR file; with front, its front matter lines go between the two `---` lines."""
+    text = body if front is None else "---\n" + front + "---\n\n" + body
+    return Adr(f"docs/adr/{number}-{slug}.md", text)
+
+
+def adr_verdict(*adrs):
+    return evaluate(pull_request(adrs=list(adrs)))
+
+
+def parse(text):
+    """The front matter of an ADR that has one."""
+    front = decisions.parse_front_matter("docs/adr/0001-x.md", text)
+    assert front is not None
+    return front
+
+
+class AdrFrontMatterTest(unittest.TestCase):
+    def test_adr_numbers_in_a_list_stay_text(self):
+        front = parse("---\nsupersedes: [0020, 0008]\n---\n")
+        self.assertEqual(front.values["supersedes"], ["0020", "0008"])
+
+    def test_adr_number_from_the_file_name_stays_text(self):
+        self.assertEqual(adr("0020").number, "0020")
+
+    def test_without_a_first_dashes_line_there_is_no_front_matter(self):
+        for text in ("# Title\n\n---\nstatus: accepted\n---\n", "\n---\nstatus: accepted\n---\n", ""):
+            with self.subTest(text=text):
+                self.assertIsNone(decisions.parse_front_matter("docs/adr/0001-x.md", text))
+
+    def test_valid_front_matter_and_body(self):
+        front = parse("---\n" + ACCEPTED + "---\n# Title\n")
+        self.assertEqual(front.values, {"status": "accepted", "decided": "2026-09-01", "updated": "2026-09-01"})
+        self.assertEqual(front.body, "# Title")
+        self.assertEqual(front.errors, [])
+
+    def test_windows_line_endings_pass(self):
+        text = ("---\n" + ACCEPTED + "---\n\n" + DECISION_BODY).replace("\n", "\r\n")
+        self.assertTrue(adr_verdict(Adr("docs/adr/0001-x.md", text)).passed)
+
+    def test_spacing_inside_a_list_is_free(self):
+        front = parse("---\namends: [ 0020 ,0031 ]\n---\n")
+        self.assertEqual(front.values["amends"], ["0020", "0031"])
+
+    def test_unclosed_front_matter_fails(self):
+        verdict = adr_verdict(Adr("docs/adr/0001-x.md", "---\n" + ACCEPTED + "\n# Title\n"))
+        self.assertEqual(verdict.errors, [
+            "docs/adr/0001-x.md line 1: the front matter starts here but has no closing `---` line."
+        ])
+
+    def test_line_that_is_not_key_value_fails_naming_the_line(self):
+        cases = {
+            "status accepted\n": "found `status accepted`",
+            "\n": "found a blank line",
+            ": accepted\n": "found `: accepted`",
+            "  status: accepted\n": "found `  status: accepted`",
+            "status:\n": "found `status:`",
+            "status:accepted\n": "found `status:accepted`",
+            "# a comment\n": "found `# a comment`",
+        }
+        for line, found in cases.items():
+            with self.subTest(line=line):
+                verdict = adr_verdict(adr("0001", "decided: 2026-09-01\n" + line))
+                self.assertFalse(verdict.passed)
+                self.assertEqual(verdict.errors, [
+                    f"docs/adr/0001-decision.md line 3: front matter lines are `key: value`, {found}."
+                ])
+
+    def test_unknown_key_fails(self):
+        for key in ("title", "Status", "superseded_by", "date"):
+            with self.subTest(key=key):
+                verdict = adr_verdict(adr("0001", ACCEPTED + f"{key}: accepted\n"))
+                self.assertFalse(verdict.passed)
+                self.assertEqual(len(verdict.errors), 1)
+                self.assertIn(f"docs/adr/0001-decision.md line 5: `{key}` is not a front matter key", verdict.errors[0])
+
+    def test_duplicate_key_fails(self):
+        verdict = adr_verdict(adr("0001", ACCEPTED + "status: proposed\n"))
+        self.assertEqual(verdict.errors, ["docs/adr/0001-decision.md line 5: `status` is already set on line 2."])
+
+    def test_other_value_syntax_fails(self):
+        for value in ('"accepted"', "'accepted'", "accepted # note", "two words", "0020", "[20]", "[0020,]",
+                      "[0020", "[a]", "{status: accepted}", "- 0020", "2026-9-1", "[0020, [0031]]", "|"):
+            with self.subTest(value=value):
+                verdict = adr_verdict(adr("0001", f"status: {value}\ndecided: 2026-09-01\nupdated: 2026-09-01\n"))
+                self.assertEqual(verdict.errors, [
+                    f"docs/adr/0001-decision.md line 2: `{value}` is not a bare word, an ISO date (YYYY-MM-DD) "
+                    "or a list of four-digit ADR numbers such as `[0020, 0031]`."
+                ])
+
+    def test_syntax_errors_are_all_reported_and_skip_the_other_rules(self):
+        verdict = adr_verdict(adr("0001", "title: x\nstatus: accepted\nstatus: done\n", body=OLD_BODY))
+        self.assertEqual(len(verdict.errors), 2)
+        self.assertIn("line 2: `title`", verdict.errors[0])
+        self.assertIn("line 4: `status` is already set on line 3", verdict.errors[1])
+
+
+class AdrRulesTest(unittest.TestCase):
+    def test_complete_adr_passes(self):
+        self.assertTrue(adr_verdict(adr("0001", ACCEPTED)).passed)
+
+    def test_missing_required_key_fails(self):
+        for key in ("status", "decided", "updated"):
+            with self.subTest(key=key):
+                front = "".join(line + "\n" for line in ACCEPTED.splitlines() if not line.startswith(key))
+                verdict = adr_verdict(adr("0001", front))
+                self.assertEqual(verdict.errors, [
+                    f"docs/adr/0001-decision.md: the front matter has no `{key}`. "
+                    "An ADR with front matter has `status`, `decided` and `updated`."
+                ])
+
+    def test_every_missing_required_key_is_named(self):
+        verdict = adr_verdict(adr("0001", "amends: [0002]\n"), adr("0002", ACCEPTED + "amended-by: [0001]\n"))
+        self.assertEqual(verdict.errors, [
+            "docs/adr/0001-decision.md: the front matter has no `status`, `decided`, `updated`. "
+            "An ADR with front matter has `status`, `decided` and `updated`."
+        ])
+
+    def test_each_status_passes(self):
+        for status in ("proposed", "accepted", "rejected", "deprecated"):
+            with self.subTest(status=status):
+                self.assertTrue(adr_verdict(adr("0001", ACCEPTED.replace("accepted", status))).passed)
+
+    def test_other_status_fails(self):
+        for status in ("Accepted", "done", "superseeded", "2026-09-01", "[0002]"):
+            with self.subTest(status=status):
+                verdict = adr_verdict(adr("0001", ACCEPTED.replace("accepted", status)), adr("0002"))
+                self.assertFalse(verdict.passed)
+                self.assertIn(
+                    f"docs/adr/0001-decision.md: `status` is `{status}`; it must be one of proposed, accepted, "
+                    "rejected, deprecated, superseded.",
+                    verdict.errors,
+                )
+
+    def test_invalid_date_fails(self):
+        for key in ("decided", "updated"):
+            for value in ("2026-02-30", "2026-13-01", "0000-01-01", "today", "[0001]"):
+                with self.subTest(key=key, value=value):
+                    front = ACCEPTED.replace(f"{key}: 2026-09-01", f"{key}: {value}")
+                    verdict = adr_verdict(adr("0001", front), adr("0002"))
+                    self.assertFalse(verdict.passed)
+                    self.assertIn(
+                        f"docs/adr/0001-decision.md: `{key}` is `{value}`, which is not a date (YYYY-MM-DD).",
+                        verdict.errors,
+                    )
+
+    def test_updated_before_decided_fails(self):
+        verdict = adr_verdict(adr("0001", "status: accepted\ndecided: 2026-09-02\nupdated: 2026-09-01\n"))
+        self.assertEqual(verdict.errors, [
+            "docs/adr/0001-decision.md: `updated` (2026-09-01) is before `decided` (2026-09-02)."
+        ])
+
+    def test_updated_after_decided_passes(self):
+        self.assertTrue(adr_verdict(adr("0001", "status: accepted\ndecided: 2025-12-31\nupdated: 2026-01-01\n")).passed)
+
+    def test_relation_that_is_not_a_list_fails(self):
+        for key in ("supersedes", "superseded-by", "amends", "amended-by"):
+            with self.subTest(key=key):
+                verdict = adr_verdict(adr("0001", ACCEPTED + f"{key}: accepted\n"))
+                self.assertIn(
+                    f"docs/adr/0001-decision.md: `{key}` is `accepted`; it must be a list of ADR numbers such as "
+                    "`[0020]`.",
+                    verdict.errors,
+                )
+
+    def test_empty_relation_list_fails(self):
+        for key in ("supersedes", "amends", "amended-by"):
+            with self.subTest(key=key):
+                verdict = adr_verdict(adr("0001", ACCEPTED + f"{key}: []\n"))
+                self.assertEqual(verdict.errors, [
+                    f"docs/adr/0001-decision.md: `{key}` is an empty list. Name the ADRs, or remove the key."
+                ])
+
+    def test_relation_to_a_missing_adr_fails(self):
+        verdict = adr_verdict(adr("0001", ACCEPTED + "amends: [0009]\n"))
+        self.assertEqual(verdict.errors, [
+            "docs/adr/0001-decision.md: `amends` names ADR 0009, but there is no docs/adr/0009-*.md."
+        ])
+
+    def test_relation_to_the_adr_itself_fails(self):
+        verdict = adr_verdict(adr("0001", ACCEPTED + "amends: [0001]\n"))
+        self.assertEqual(verdict.errors, ["docs/adr/0001-decision.md: `amends` names this ADR itself (0001)."])
+
+    def test_superseded_without_superseded_by_fails(self):
+        verdict = adr_verdict(adr("0001", ACCEPTED.replace("accepted", "superseded")))
+        self.assertEqual(verdict.errors, [
+            "docs/adr/0001-decision.md: `status` is `superseded`, but no `superseded-by` names the ADR that "
+            "replaced it."
+        ])
+
+    def test_superseded_by_without_superseded_status_fails(self):
+        verdict = adr_verdict(
+            adr("0001", ACCEPTED + "superseded-by: [0002]\n"),
+            adr("0002", ACCEPTED + "supersedes: [0001]\n"),
+        )
+        self.assertEqual(verdict.errors, [
+            "docs/adr/0001-decision.md: `superseded-by` is set, so `status` must be `superseded`."
+        ])
+
+    def test_superseded_with_superseded_by_passes(self):
+        verdict = adr_verdict(
+            adr("0001", ACCEPTED.replace("accepted", "superseded") + "superseded-by: [0002]\n"),
+            adr("0002", ACCEPTED + "supersedes: [0001]\n"),
+        )
+        self.assertTrue(verdict.passed)
+
+    def test_status_heading_in_the_body_fails(self):
+        verdict = adr_verdict(adr("0001", ACCEPTED, body=OLD_BODY))
+        self.assertEqual(verdict.errors, [
+            "docs/adr/0001-decision.md: the body has a `## Status` section. The status lives only in the front "
+            "matter; remove the section."
+        ])
+
+    def test_status_heading_in_fenced_code_or_at_another_level_passes(self):
+        for body in ("# Title\n\n```\n## Status\n```\n", "# Title\n\n### Status\n", "# Status\n"):
+            with self.subTest(body=body):
+                self.assertTrue(adr_verdict(adr("0001", ACCEPTED, body=body)).passed)
+
+
+class AdrRelationsTest(unittest.TestCase):
+    def test_relations_on_both_ends_pass(self):
+        verdict = adr_verdict(
+            adr("0001", ACCEPTED.replace("accepted", "superseded") + "superseded-by: [0003]\n"),
+            adr("0002", ACCEPTED + "amended-by: [0003]\n"),
+            adr("0003", ACCEPTED + "supersedes: [0001]\namends: [0002]\n"),
+        )
+        self.assertTrue(verdict.passed)
+
+    def test_relation_missing_on_the_other_end_fails(self):
+        cases = (
+            ("supersedes", "superseded-by", "accepted"),
+            ("superseded-by", "supersedes", "superseded"),
+            ("amends", "amended-by", "accepted"),
+            ("amended-by", "amends", "accepted"),
+        )
+        for key, inverse, status in cases:
+            with self.subTest(key=key):
+                own = ACCEPTED.replace("accepted", status) + f"{key}: [0002]\n"
+                verdict = adr_verdict(adr("0001", own), adr("0002", ACCEPTED))
+                self.assertEqual(verdict.errors, [
+                    f"docs/adr/0001-decision.md names ADR 0002 under `{key}`, but docs/adr/0002-decision.md does "
+                    f"not name ADR 0001 under `{inverse}`. Add it there, so the relation stands on both ends."
+                ])
+
+    def test_other_end_naming_another_adr_fails(self):
+        verdict = adr_verdict(
+            adr("0001", ACCEPTED),
+            adr("0002", ACCEPTED + "amended-by: [0001]\n"),
+            adr("0003", ACCEPTED + "amends: [0002]\n"),
+        )
+        self.assertEqual(len(verdict.errors), 2)
+        self.assertIn("docs/adr/0002-decision.md names ADR 0001 under `amended-by`", verdict.errors[0])
+        self.assertIn("docs/adr/0003-decision.md names ADR 0002 under `amends`", verdict.errors[1])
+
+    def test_relation_to_an_adr_without_front_matter_says_to_add_it(self):
+        for key, inverse in (("supersedes", "superseded-by"), ("amends", "amended-by")):
+            with self.subTest(key=key):
+                verdict = adr_verdict(adr("0001", body=OLD_BODY), adr("0002", ACCEPTED + f"{key}: [0001]\n"))
+                self.assertEqual(verdict.errors, [
+                    f"docs/adr/0002-decision.md names ADR 0001 under `{key}`, but docs/adr/0001-decision.md has no "
+                    f"front matter. Add front matter to it with `{inverse}: [0002]`, so the relation stands on both "
+                    "ends."
+                ])
+
+    def test_relation_from_the_older_end_to_an_adr_without_front_matter_fails(self):
+        verdict = adr_verdict(adr("0001", ACCEPTED + "amended-by: [0002]\n"), adr("0002"))
+        self.assertEqual(len(verdict.errors), 1)
+        self.assertIn("docs/adr/0002-decision.md has no front matter. Add front matter to it with `amends: [0001]`",
+                      verdict.errors[0])
+
+    def test_other_end_with_a_syntax_error_reports_only_that_error(self):
+        verdict = adr_verdict(adr("0001", "status accepted\n"), adr("0002", ACCEPTED + "amends: [0001]\n"))
+        self.assertEqual(len(verdict.errors), 1)
+        self.assertIn("docs/adr/0001-decision.md line 2", verdict.errors[0])
+
+
+class AdrNumberTest(unittest.TestCase):
+    def test_number_used_twice_with_front_matter_fails(self):
+        verdict = adr_verdict(adr("0001", ACCEPTED, slug="a"), adr("0001", ACCEPTED, slug="b"))
+        self.assertEqual(verdict.errors, [
+            "ADR number 0001 is used by more than one file: docs/adr/0001-a.md, docs/adr/0001-b.md. "
+            "Give each ADR its own number."
+        ])
+
+    def test_number_shared_by_an_old_and_a_new_adr_fails(self):
+        verdict = adr_verdict(adr("0001", slug="a"), adr("0001", ACCEPTED, slug="b"))
+        self.assertFalse(verdict.passed)
+        self.assertIn("ADR number 0001 is used by more than one file", verdict.errors[0])
+
+    def test_number_shared_by_old_adrs_nothing_points_to_passes(self):
+        self.assertTrue(adr_verdict(adr("0001", slug="a"), adr("0001", slug="b"), adr("0002", ACCEPTED)).passed)
+
+    def test_number_shared_by_old_adrs_a_relation_points_to_fails(self):
+        verdict = adr_verdict(adr("0001", slug="a"), adr("0001", slug="b"), adr("0002", ACCEPTED + "amends: [0001]\n"))
+        self.assertEqual(verdict.errors, [
+            "ADR number 0001 is used by more than one file: docs/adr/0001-a.md, docs/adr/0001-b.md. "
+            "Give each ADR its own number."
+        ])
+
+
+class AdrMixTest(unittest.TestCase):
+    def test_old_adrs_without_front_matter_stay_unchecked(self):
+        verdict = adr_verdict(
+            adr("0001", body=OLD_BODY),
+            adr("0002", body="Not even a heading.\n"),
+            adr("0003", ACCEPTED.replace("accepted", "superseded") + "superseded-by: [0005]\n"),
+            adr("0004", ACCEPTED),
+            adr("0005", ACCEPTED + "supersedes: [0003]\n"),
+        )
+        self.assertTrue(verdict.passed)
+
+    def test_no_adrs_pass(self):
+        self.assertTrue(adr_verdict().passed)
+
+    def test_exempt_branch_and_opt_out_still_check_the_adrs(self):
+        bad = [adr("0001", "status: done\n")]
+        for overrides in ({"head_branch": "renovate/x"}, {"labels": ["no-decisions"]}, {"body": "decisions: none"}):
+            with self.subTest(overrides=overrides):
+                verdict = evaluate(pull_request(issues=[], adrs=bad, **overrides))
+                self.assertFalse(verdict.passed)
+                self.assertIn("the ADRs are checked", verdict.notices[0])
+
+
 class WorkflowFileTest(unittest.TestCase):
     def test_file_name_from_workflow_ref(self):
         ref = "octo/repo/.github/workflows/decisions.yml@refs/heads/main"
@@ -633,9 +963,10 @@ class WorkflowFileTest(unittest.TestCase):
 
 
 class FakeClient:
-    def __init__(self, graphql_data=None, files=None, runs=None):
+    def __init__(self, graphql_data=None, files=None, runs=None, directories=None):
         self.graphql_data = graphql_data
         self.files = files or {}
+        self.directories = directories or {}
         self.runs = runs or {}
         self.graphql_calls = []
         self.reruns = []
@@ -646,6 +977,9 @@ class FakeClient:
 
     def file_at(self, path, ref):
         return self.files.get((path, ref))
+
+    def list_dir(self, path, ref):
+        return self.directories.get((path, ref))
 
     def latest_run(self, workflow, head_sha):
         return self.runs.get((workflow, head_sha))
@@ -785,6 +1119,51 @@ class RunPullRequestTest(unittest.TestCase):
         code, output = run_quietly(decisions.run_pull_request, {"push": {}}, FakeClient(), REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::", output)
+
+
+def load_adrs(client, ref):
+    """decisions.load_adrs with a FakeClient, which mirrors only the calls the tests make."""
+    return decisions.load_adrs(typing.cast(decisions.Client, client), ref)
+
+
+class LoadAdrsTest(unittest.TestCase):
+    def test_repository_without_adr_directory_has_nothing_to_check(self):
+        client = FakeClient(graphql_data=pull_request_data(issues=[(1, GOOD_ISSUE)]))
+        self.assertEqual(load_adrs(client, "head-sha"), [])
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
+        self.assertEqual(code, 0)
+        self.assertNotIn("::error::", output)
+
+    def test_reads_only_adr_files_at_the_head_commit(self):
+        names = ["README.md", "0002-b.md", "template.md", "01-short.md", "00003-long.md", "0004-.md", "0001-a.md",
+                 "0005-c.markdown"]
+        client = FakeClient(
+            graphql_data=pull_request_data(issues=[(1, GOOD_ISSUE)]),
+            directories={("docs/adr", "head-sha"): names, ("docs/adr", "base-sha"): ["0009-z.md"]},
+            files={("docs/adr/0001-a.md", "head-sha"): "# A\n", ("docs/adr/0002-b.md", "head-sha"): "---\nstatus: x\n"},
+        )
+        self.assertEqual(load_adrs(client, "head-sha"), [
+            Adr("docs/adr/0001-a.md", "# A\n"),
+            Adr("docs/adr/0002-b.md", "---\nstatus: x\n"),
+        ])
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::docs/adr/0002-b.md line 1: the front matter starts here but has no closing", output)
+
+    def test_exempt_branch_still_reads_the_adrs(self):
+        client = FakeClient(
+            directories={("docs/adr", "head-sha"): ["0001-a.md"]},
+            files={("docs/adr/0001-a.md", "head-sha"): "---\nstatus: done\n---\n"},
+        )
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event("renovate/x"), client, REPO, SHARED)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::docs/adr/0001-a.md: `status` is `done`", output)
+        self.assertEqual(client.graphql_calls, [])
+
+    def test_listed_adr_that_cannot_be_read_raises(self):
+        client = FakeClient(directories={("docs/adr", "head-sha"): ["0001-a.md"]})
+        with self.assertRaisesRegex(RuntimeError, "docs/adr/0001-a.md is listed at head-sha but could not be read"):
+            load_adrs(client, "head-sha")
 
 
 def issue_data(*pulls):
@@ -932,6 +1311,32 @@ class GitHubClientTest(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError):
                 self.client.graphql("query", {})
 
+
+    def test_list_dir_returns_the_names_of_the_files(self):
+        listing = json.dumps([
+            {"name": "0001-a.md", "type": "file"},
+            {"name": "drafts", "type": "dir"},
+            {"name": "0002-b.md", "type": "file"},
+        ]).encode()
+        with mock.patch.object(decisions.urllib.request, "urlopen", return_value=FakeResponse(listing)) as urlopen:
+            self.assertEqual(self.client.list_dir("docs/adr", "sha"), ["0001-a.md", "0002-b.md"])
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url, "https://api.example/repos/octo/repo/contents/docs/adr?ref=sha"
+        )
+
+    def test_list_dir_returns_none_when_the_directory_is_absent(self):
+        with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=http_error(404)):
+            self.assertIsNone(self.client.list_dir("docs/adr", "sha"))
+
+    def test_list_dir_returns_none_when_the_path_is_a_file(self):
+        entry = json.dumps({"name": "adr", "type": "file"}).encode()
+        with mock.patch.object(decisions.urllib.request, "urlopen", return_value=FakeResponse(entry)):
+            self.assertIsNone(self.client.list_dir("docs/adr", "sha"))
+
+    def test_list_dir_raises_on_a_server_error(self):
+        with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=http_error(500)):
+            with self.assertRaises(urllib.error.HTTPError):
+                self.client.list_dir("docs/adr", "sha")
 
 if __name__ == "__main__":
     unittest.main()

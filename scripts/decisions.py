@@ -14,6 +14,7 @@ so they can be tested without the GitHub API; the API sits behind GitHubClient.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import posixpath
@@ -35,6 +36,16 @@ SHARED_REPOSITORY = "danielcopper/.github"
 ISSUE_HEADING_LEVELS = (2, 3)
 # What an issue form writes for an optional field left blank.
 NO_RESPONSE = "_No response_"
+ADR_DIRECTORY = "docs/adr"
+ADR_STATUSES = ("proposed", "accepted", "rejected", "deprecated", "superseded")
+ADR_REQUIRED_KEYS = ("status", "decided", "updated")
+# Each relation key with the key the other ADR declares it with.
+ADR_RELATIONS = {
+    "supersedes": "superseded-by",
+    "superseded-by": "supersedes",
+    "amends": "amended-by",
+    "amended-by": "amends",
+}
 OPT_OUT_LABEL = "no-decisions"
 OPT_OUT_BODY = re.compile(r"decisions:\s*none", re.IGNORECASE)
 EXEMPT_BRANCH_PREFIXES = ("renovate/", "release-please--")
@@ -46,6 +57,13 @@ _ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
 _CLOSING_SEQUENCE = re.compile(r"(?:^|[ \t]+)#+$")
 # A task-list item such as `- [ ] Which way?` or `* [x] Settled.`; group 1 is the box's mark.
 _TASK_ITEM = re.compile(r"^[ \t]*[-*+][ \t]+\[([ xX])\](?:[ \t]|$)")
+
+# An ADR file name, `0007-some-slug.md`.
+_ADR_FILE = re.compile(r"^\d{4}-[^/]+\.md$")
+_FRONT_MATTER_LINE = re.compile(r"^([A-Za-z0-9_-]+):[ \t]+(\S.*)$")
+_WORD = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ADR_NUMBER = re.compile(r"^\d{4}$")
 
 
 # --- Markdown -------------------------------------------------------------
@@ -168,6 +186,218 @@ def open_questions(text: str) -> list[str]:
     return result
 
 
+# --- ADRs -----------------------------------------------------------------
+
+
+@dataclass
+class Adr:
+    """An ADR file, `docs/adr/NNNN-slug.md`, at the pull request's head commit."""
+
+    path: str
+    text: str
+
+    @property
+    def number(self) -> str:
+        """The four digits the file name starts with, kept as text: `0020` stays `0020`."""
+        return posixpath.basename(self.path)[:4]
+
+
+# A front matter value: a bare word or an ISO date as text, or a list of ADR numbers.
+FrontMatterValue = str | list[str]
+
+
+@dataclass
+class FrontMatter:
+    """An ADR's front matter as read by parse_front_matter, and the body below it."""
+
+    values: dict[str, FrontMatterValue]
+    body: str
+    errors: list[str]
+
+
+def _front_matter_value(raw: str) -> FrontMatterValue | None:
+    """The value of a front matter line, or None when it is none of the three kinds."""
+    if raw.startswith("["):
+        if not raw.endswith("]"):
+            return None
+        inner = raw[1:-1].strip()
+        if not inner:
+            return []
+        entries = [entry.strip() for entry in inner.split(",")]
+        return entries if all(_ADR_NUMBER.match(entry) for entry in entries) else None
+    if _WORD.match(raw) or _DATE.match(raw):
+        return raw
+    return None
+
+
+def parse_front_matter(path: str, text: str) -> FrontMatter | None:
+    """Read an ADR's front matter, or return None when the ADR has none.
+
+    The front matter is the block between a first line `---` and the next
+    `---` line. Each line in it is `key: value` with an allowed key, set once;
+    the value is a bare word, an ISO date or a flow list of four-digit ADR
+    numbers such as `[0020, 0031]`. Anything else is an error naming the line.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].rstrip() != "---":
+        return None
+    closing = next((index for index in range(1, len(lines)) if lines[index].rstrip() == "---"), None)
+    if closing is None:
+        return FrontMatter({}, "", [f"{path} line 1: the front matter starts here but has no closing `---` line."])
+    allowed = (*ADR_REQUIRED_KEYS, *ADR_RELATIONS)
+    values: dict[str, FrontMatterValue] = {}
+    first_line: dict[str, int] = {}
+    errors: list[str] = []
+    for number in range(2, closing + 1):
+        line = lines[number - 1].rstrip()
+        where = f"{path} line {number}"
+        match = _FRONT_MATTER_LINE.match(line)
+        if not match:
+            found = f"`{line}`" if line.strip() else "a blank line"
+            errors.append(f"{where}: front matter lines are `key: value`, found {found}.")
+            continue
+        key, raw = match.groups()
+        value = _front_matter_value(raw)
+        if key not in allowed:
+            errors.append(f"{where}: `{key}` is not a front matter key. The keys are {', '.join(allowed)}.")
+        elif key in first_line:
+            errors.append(f"{where}: `{key}` is already set on line {first_line[key]}.")
+        elif value is None:
+            errors.append(
+                f"{where}: `{raw}` is not a bare word, an ISO date (YYYY-MM-DD) or a list of four-digit ADR "
+                "numbers such as `[0020, 0031]`."
+            )
+        else:
+            values[key] = value
+            first_line[key] = number
+    return FrontMatter(values, "\n".join(lines[closing + 1:]), errors)
+
+
+def _shown(value: FrontMatterValue) -> str:
+    return f"[{', '.join(value)}]" if isinstance(value, list) else value
+
+
+def _date(value: FrontMatterValue) -> datetime.date | None:
+    if not isinstance(value, str) or not _DATE.match(value):
+        return None
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def front_matter_errors(adr: Adr, front: FrontMatter, numbers: set[str]) -> list[str]:
+    """The rules for one ADR with front matter that parsed; numbers are all ADR numbers in the repository."""
+    values = front.values
+    errors = []
+    missing = [key for key in ADR_REQUIRED_KEYS if key not in values]
+    if missing:
+        errors.append(
+            f"{adr.path}: the front matter has no {', '.join(f'`{key}`' for key in missing)}. "
+            "An ADR with front matter has `status`, `decided` and `updated`."
+        )
+    status = values.get("status")
+    if status is not None and status not in ADR_STATUSES:
+        errors.append(f"{adr.path}: `status` is `{_shown(status)}`; it must be one of {', '.join(ADR_STATUSES)}.")
+    dates = {}
+    for key in ("decided", "updated"):
+        if key in values:
+            date = _date(values[key])
+            if date is None:
+                errors.append(f"{adr.path}: `{key}` is `{_shown(values[key])}`, which is not a date (YYYY-MM-DD).")
+            else:
+                dates[key] = date
+    if len(dates) == 2 and dates["updated"] < dates["decided"]:
+        errors.append(f"{adr.path}: `updated` ({dates['updated']}) is before `decided` ({dates['decided']}).")
+    for key in ADR_RELATIONS:
+        value = values.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            errors.append(f"{adr.path}: `{key}` is `{value}`; it must be a list of ADR numbers such as `[0020]`.")
+            continue
+        if not value:
+            errors.append(f"{adr.path}: `{key}` is an empty list. Name the ADRs, or remove the key.")
+        for entry in value:
+            if entry == adr.number:
+                errors.append(f"{adr.path}: `{key}` names this ADR itself ({entry}).")
+            elif entry not in numbers:
+                errors.append(f"{adr.path}: `{key}` names ADR {entry}, but there is no {ADR_DIRECTORY}/{entry}-*.md.")
+    if status == "superseded" and "superseded-by" not in values:
+        errors.append(f"{adr.path}: `status` is `superseded`, but no `superseded-by` names the ADR that replaced it.")
+    elif status != "superseded" and "superseded-by" in values:
+        errors.append(f"{adr.path}: `superseded-by` is set, so `status` must be `superseded`.")
+    if has_heading(front.body, "Status", levels=(2,)):
+        errors.append(
+            f"{adr.path}: the body has a `## Status` section. The status lives only in the front matter; "
+            "remove the section."
+        )
+    return errors
+
+
+def adr_errors(adrs: list[Adr]) -> list[str]:
+    """The ADR rules over every ADR at the head commit; README.md lists them.
+
+    An ADR without front matter is only checked when a relation points to it,
+    or when it shares its number with an ADR that has front matter.
+    """
+    by_number: dict[str, list[Adr]] = {}
+    for adr in adrs:
+        by_number.setdefault(adr.number, []).append(adr)
+    fronts = {adr.path: parse_front_matter(adr.path, adr.text) for adr in adrs}
+    # The front matter whose relations can be followed: present and free of syntax errors.
+    readable = {path: front for path, front in fronts.items() if front is not None and not front.errors}
+
+    errors: list[str] = []
+    for adr in adrs:
+        front = fronts[adr.path]
+        if front is not None:
+            errors.extend(front.errors or front_matter_errors(adr, front, set(by_number)))
+
+    targets = {
+        entry
+        for front in readable.values()
+        for key in ADR_RELATIONS
+        for entry in _relation(front, key)
+    }
+    for number, files in sorted(by_number.items()):
+        if len(files) > 1 and (number in targets or any(fronts[adr.path] is not None for adr in files)):
+            errors.append(
+                f"ADR number {number} is used by more than one file: {', '.join(adr.path for adr in files)}. "
+                "Give each ADR its own number."
+            )
+
+    for adr in adrs:
+        front = readable.get(adr.path)
+        if front is None:
+            continue
+        for key, inverse in ADR_RELATIONS.items():
+            for entry in _relation(front, key):
+                others = by_number.get(entry, [])
+                # A missing, duplicate or self reference is reported above.
+                if entry == adr.number or len(others) != 1:
+                    continue
+                other = others[0]
+                other_front = fronts[other.path]
+                if other_front is None:
+                    errors.append(
+                        f"{adr.path} names ADR {entry} under `{key}`, but {other.path} has no front matter. "
+                        f"Add front matter to it with `{inverse}: [{adr.number}]`, so the relation stands on both ends."
+                    )
+                elif other.path in readable and adr.number not in _relation(other_front, inverse):
+                    errors.append(
+                        f"{adr.path} names ADR {entry} under `{key}`, but {other.path} does not name ADR "
+                        f"{adr.number} under `{inverse}`. Add it there, so the relation stands on both ends."
+                    )
+    return errors
+
+
+def _relation(front: FrontMatter, key: str) -> list[str]:
+    """The ADR numbers a relation key lists; empty when it is absent or not a list."""
+    value = front.values.get(key)
+    return value if isinstance(value, list) else []
+
+
 # --- Rules ----------------------------------------------------------------
 
 
@@ -197,6 +427,7 @@ class PullRequest:
     head_claude_md: str | None
     head_planned_change: str | None
     shared_planned_change: SharedForm
+    adrs: list[Adr]
     issues: list[Issue]
 
 
@@ -278,18 +509,20 @@ def evaluate(pr: PullRequest) -> Verdict:
     copy = planned_change_error(pr.head_planned_change, pr.shared_planned_change)
     if copy:
         verdict.errors.append(copy)
+    verdict.errors.extend(adr_errors(pr.adrs))
 
     if is_exempt(pr.head_branch, pr.from_fork):
         verdict.notices.append(
-            f"Branch {pr.head_branch} is exempt from the linked-issue rules; only the {CLAUDE_MD} section "
-            "and the Planned change copy are checked."
+            f"Branch {pr.head_branch} is exempt from the linked-issue rules; only the {CLAUDE_MD} section, "
+            "the Planned change copy and the ADRs are checked."
         )
         return verdict
 
     if is_opted_out(pr.labels, pr.body):
         verdict.notices.append(
             "Opted out of the linked-issue rules (`decisions: none` or the "
-            f"`{OPT_OUT_LABEL}` label); only the {CLAUDE_MD} section and the Planned change copy are checked."
+            f"`{OPT_OUT_LABEL}` label); only the {CLAUDE_MD} section, the Planned change copy and the ADRs are "
+            "checked."
         )
         return verdict
 
@@ -324,6 +557,8 @@ class Client(Protocol):
     def graphql(self, query: str, variables: dict) -> dict: ...
 
     def file_at(self, path: str, ref: str) -> str | None: ...
+
+    def list_dir(self, path: str, ref: str) -> list[str] | None: ...
 
     def latest_run(self, workflow: str, head_sha: str) -> dict | None: ...
 
@@ -363,6 +598,20 @@ class GitHubClient:
             if error.code == 404:
                 return None
             raise
+
+    def list_dir(self, path: str, ref: str) -> list[str] | None:
+        """The names of the files directly in the directory at path, or None when there is no directory."""
+        url = f"{self._api_url}/repos/{self.repository}/contents/{path}?ref={ref}"
+        try:
+            entries = json.loads(self._request("GET", url))
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            raise
+        # For a file the API returns one object instead of a list.
+        if not isinstance(entries, list):
+            return None
+        return [entry["name"] for entry in entries if entry["type"] == "file"]
 
     def latest_run(self, workflow: str, head_sha: str) -> dict | None:
         url = (
@@ -408,6 +657,20 @@ def _repo_variables(repository: str, number: int) -> dict:
     return {"owner": owner, "name": name, "number": number}
 
 
+def load_adrs(client: Client, ref: str) -> list[Adr]:
+    """The ADRs at ref: the files named `NNNN-slug.md` directly in docs/adr/. Other files there are not read."""
+    adrs = []
+    for name in sorted(client.list_dir(ADR_DIRECTORY, ref) or []):
+        if not _ADR_FILE.match(name):
+            continue
+        path = f"{ADR_DIRECTORY}/{name}"
+        text = client.file_at(path, ref)
+        if text is None:
+            raise RuntimeError(f"{path} is listed at {ref} but could not be read.")
+        adrs.append(Adr(path, text))
+    return adrs
+
+
 def load_pull_request(event: dict, client: Client, repository: str, shared: SharedForm) -> PullRequest:
     """Build the PullRequest to judge.
 
@@ -423,9 +686,11 @@ def load_pull_request(event: dict, client: Client, repository: str, shared: Shar
     base_claude_md = client.file_at(CLAUDE_MD, pr["base"]["sha"])
     head_claude_md = client.file_at(CLAUDE_MD, pr["head"]["sha"])
     head_planned_change = client.file_at(PLANNED_CHANGE, pr["head"]["sha"])
+    adrs = load_adrs(client, pr["head"]["sha"])
     if is_exempt(head_branch, from_fork):
         return PullRequest(
-            repository, head_branch, from_fork, "", [], base_claude_md, head_claude_md, head_planned_change, shared, []
+            repository, head_branch, from_fork, "", [], base_claude_md, head_claude_md, head_planned_change, shared,
+            adrs, [],
         )
     data = client.graphql(PULL_REQUEST_QUERY, _repo_variables(repository, pr["number"]))
     live = data["repository"]["pullRequest"]
@@ -439,6 +704,7 @@ def load_pull_request(event: dict, client: Client, repository: str, shared: Shar
         head_claude_md=head_claude_md,
         head_planned_change=head_planned_change,
         shared_planned_change=shared,
+        adrs=adrs,
         issues=[
             Issue(node["repository"]["nameWithOwner"], node["number"], node["body"] or "")
             for node in live["closingIssuesReferences"]["nodes"]
