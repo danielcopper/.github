@@ -397,7 +397,7 @@ def run_pull_request(event: dict, client: Client, repository: str) -> int:
 
 
 def run_issue(event: dict, client: Client, repository: str, workflow_ref: str) -> int:
-    """Re-run the check of each open pull request in this repository that closes the issue."""
+    """Re-run the check after an edit of the issue; README.md says which runs."""
     workflow = workflow_file(workflow_ref, repository)
     number = event["issue"]["number"]
     data = client.graphql(ISSUE_QUERY, _repo_variables(repository, number))
