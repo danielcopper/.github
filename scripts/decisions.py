@@ -21,6 +21,7 @@ import posixpath
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -37,6 +38,8 @@ ISSUE_HEADING_LEVELS = (2, 3)
 # What an issue form writes for an optional field left blank.
 NO_RESPONSE = "_No response_"
 ADR_DIRECTORY = "docs/adr"
+# The contents API lists at most this many entries of a directory.
+CONTENTS_LISTING_LIMIT = 1000
 ADR_STATUSES = ("proposed", "accepted", "rejected", "deprecated", "superseded")
 ADR_REQUIRED_KEYS = ("status", "decided", "updated")
 # Each relation key with the key the other ADR declares it with.
@@ -154,9 +157,10 @@ def open_questions(text: str) -> list[str]:
     """The lines of the `To decide` sections that hold an open question.
 
     Sections are found as in section_has_content. Inside one, a checked
-    task-list item (`- [x]`, `- [X]`, also with `*` or `+`) is settled, and so
-    are the indented lines that follow it. An unchecked item, and every other
-    line with text, is open. Blank lines and `_No response_` are neither.
+    task-list item (`- [x]`, `- [X]`, also with `*` or `+`) is settled. An
+    unchecked item is open and reported once, by its own line. Indented lines
+    that follow any task-list item belong to it and are skipped. Every other
+    line with text is open. Blank lines and `_No response_` are neither.
     """
     result: list[str] = []
     open_level: int | None = None
@@ -191,10 +195,14 @@ def open_questions(text: str) -> list[str]:
 
 @dataclass
 class Adr:
-    """An ADR file, `docs/adr/NNNN-slug.md`, at the pull request's head commit."""
+    """An ADR file, `docs/adr/NNNN-slug.md`, at the pull request's head commit.
+
+    new is whether the base commit lacks a file of that name; a renamed ADR is new.
+    """
 
     path: str
     text: str
+    new: bool
 
     @property
     def number(self) -> str:
@@ -238,7 +246,7 @@ def parse_front_matter(path: str, text: str) -> FrontMatter | None:
     the value is a bare word, an ISO date or a flow list of four-digit ADR
     numbers such as `[0020, 0031]`. Anything else is an error naming the line.
     """
-    lines = text.splitlines()
+    lines = text.removeprefix("\ufeff").splitlines()
     if not lines or lines[0].rstrip() != "---":
         return None
     closing = next((index for index in range(1, len(lines)) if lines[index].rstrip() == "---"), None)
@@ -338,8 +346,9 @@ def front_matter_errors(adr: Adr, front: FrontMatter, numbers: set[str]) -> list
 def adr_errors(adrs: list[Adr]) -> list[str]:
     """The ADR rules over every ADR at the head commit; README.md lists them.
 
-    An ADR without front matter is only checked when a relation points to it,
-    or when it shares its number with an ADR that has front matter.
+    A new ADR needs front matter. One that already existed without it is only
+    checked when a relation points to it, or when it shares its number with an
+    ADR that has front matter.
     """
     by_number: dict[str, list[Adr]] = {}
     for adr in adrs:
@@ -353,6 +362,11 @@ def adr_errors(adrs: list[Adr]) -> list[str]:
         front = fronts[adr.path]
         if front is not None:
             errors.extend(front.errors or front_matter_errors(adr, front, set(by_number)))
+        elif adr.new:
+            errors.append(
+                f"{adr.path} is a new ADR without front matter. A new ADR needs front matter with `status`, "
+                "`decided` and `updated`."
+            )
 
     targets = {
         entry
@@ -591,7 +605,7 @@ class GitHubClient:
         return result["data"]
 
     def file_at(self, path: str, ref: str) -> str | None:
-        url = f"{self._api_url}/repos/{self.repository}/contents/{path}?ref={ref}"
+        url = f"{self._api_url}/repos/{self.repository}/contents/{urllib.parse.quote(path)}?ref={ref}"
         try:
             return self._request("GET", url, accept="application/vnd.github.raw+json").decode()
         except urllib.error.HTTPError as error:
@@ -600,8 +614,12 @@ class GitHubClient:
             raise
 
     def list_dir(self, path: str, ref: str) -> list[str] | None:
-        """The names of the files directly in the directory at path, or None when there is no directory."""
-        url = f"{self._api_url}/repos/{self.repository}/contents/{path}?ref={ref}"
+        """The names of the files directly in the directory at path, or None when there is no directory.
+
+        The API lists at most 1,000 entries, so a listing that long may be cut
+        short and raises instead.
+        """
+        url = f"{self._api_url}/repos/{self.repository}/contents/{urllib.parse.quote(path)}?ref={ref}"
         try:
             entries = json.loads(self._request("GET", url))
         except urllib.error.HTTPError as error:
@@ -611,6 +629,10 @@ class GitHubClient:
         # For a file the API returns one object instead of a list.
         if not isinstance(entries, list):
             return None
+        if len(entries) >= CONTENTS_LISTING_LIMIT:
+            raise RuntimeError(
+                f"{path} at {ref} has {len(entries)} entries, the most the contents API lists, so some may be missing."
+            )
         return [entry["name"] for entry in entries if entry["type"] == "file"]
 
     def latest_run(self, workflow: str, head_sha: str) -> dict | None:
@@ -657,17 +679,22 @@ def _repo_variables(repository: str, number: int) -> dict:
     return {"owner": owner, "name": name, "number": number}
 
 
-def load_adrs(client: Client, ref: str) -> list[Adr]:
-    """The ADRs at ref: the files named `NNNN-slug.md` directly in docs/adr/. Other files there are not read."""
+def load_adrs(client: Client, head: str, base: str) -> list[Adr]:
+    """The ADRs at the head commit: the files named `NNNN-slug.md` directly in docs/adr/.
+
+    Other files there are not read. An ADR whose file name the base commit
+    lacks is new; without docs/adr/ at the base, every ADR is.
+    """
+    at_base = set(client.list_dir(ADR_DIRECTORY, base) or [])
     adrs = []
-    for name in sorted(client.list_dir(ADR_DIRECTORY, ref) or []):
+    for name in sorted(client.list_dir(ADR_DIRECTORY, head) or []):
         if not _ADR_FILE.match(name):
             continue
         path = f"{ADR_DIRECTORY}/{name}"
-        text = client.file_at(path, ref)
+        text = client.file_at(path, head)
         if text is None:
-            raise RuntimeError(f"{path} is listed at {ref} but could not be read.")
-        adrs.append(Adr(path, text))
+            raise RuntimeError(f"{path} is listed at {head} but could not be read.")
+        adrs.append(Adr(path, text, new=name not in at_base))
     return adrs
 
 
@@ -686,7 +713,7 @@ def load_pull_request(event: dict, client: Client, repository: str, shared: Shar
     base_claude_md = client.file_at(CLAUDE_MD, pr["base"]["sha"])
     head_claude_md = client.file_at(CLAUDE_MD, pr["head"]["sha"])
     head_planned_change = client.file_at(PLANNED_CHANGE, pr["head"]["sha"])
-    adrs = load_adrs(client, pr["head"]["sha"])
+    adrs = load_adrs(client, pr["head"]["sha"], pr["base"]["sha"])
     if is_exempt(head_branch, from_fork):
         return PullRequest(
             repository, head_branch, from_fork, "", [], base_claude_md, head_claude_md, head_planned_change, shared,

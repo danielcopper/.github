@@ -603,6 +603,12 @@ class ToDecideTaskListTest(unittest.TestCase):
     def test_box_without_a_space_before_the_text_is_not_an_item(self):
         self.assertFalse(self.verdict("- [x]Which way?\n").passed)
 
+    def test_indented_line_opening_a_second_section_is_open(self):
+        body = GOOD_ISSUE + "\n## To decide\n\n- [x] Which way?\n\n## Notes\n\nText.\n\n## To decide\n\n  How fast?\n"
+        verdict = evaluate(pull_request(issues=[issue(body, number=9)]))
+        self.assertFalse(verdict.passed)
+        self.assertIn('"How fast?"', verdict.errors[0])
+
 
 class MultipleIssuesTest(unittest.TestCase):
     def test_every_issue_must_pass(self):
@@ -629,10 +635,10 @@ DECISION_BODY = "# Use one queue\n\nOne queue, not one per worker: it keeps the 
 OLD_BODY = "# Use one queue\n\n## Status\n\nAccepted.\n"
 
 
-def adr(number, front=None, body=DECISION_BODY, slug="decision"):
+def adr(number, front=None, body=DECISION_BODY, slug="decision", new=False):
     """An ADR file; with front, its front matter lines go between the two `---` lines."""
     text = body if front is None else "---\n" + front + "---\n\n" + body
-    return Adr(f"docs/adr/{number}-{slug}.md", text)
+    return Adr(f"docs/adr/{number}-{slug}.md", text, new)
 
 
 def adr_verdict(*adrs):
@@ -667,14 +673,19 @@ class AdrFrontMatterTest(unittest.TestCase):
 
     def test_windows_line_endings_pass(self):
         text = ("---\n" + ACCEPTED + "---\n\n" + DECISION_BODY).replace("\n", "\r\n")
-        self.assertTrue(adr_verdict(Adr("docs/adr/0001-x.md", text)).passed)
+        self.assertTrue(adr_verdict(Adr("docs/adr/0001-x.md", text, new=False)).passed)
+
+    def test_leading_byte_order_mark_is_ignored(self):
+        text = "\ufeff---\n" + ACCEPTED + "---\n\n" + DECISION_BODY
+        self.assertEqual(parse(text).values["status"], "accepted")
+        self.assertTrue(adr_verdict(Adr("docs/adr/0001-x.md", text, new=True)).passed)
 
     def test_spacing_inside_a_list_is_free(self):
         front = parse("---\namends: [ 0020 ,0031 ]\n---\n")
         self.assertEqual(front.values["amends"], ["0020", "0031"])
 
     def test_unclosed_front_matter_fails(self):
-        verdict = adr_verdict(Adr("docs/adr/0001-x.md", "---\n" + ACCEPTED + "\n# Title\n"))
+        verdict = adr_verdict(Adr("docs/adr/0001-x.md", "---\n" + ACCEPTED + "\n# Title\n", new=False))
         self.assertEqual(verdict.errors, [
             "docs/adr/0001-x.md line 1: the front matter starts here but has no closing `---` line."
         ])
@@ -929,6 +940,53 @@ class AdrNumberTest(unittest.TestCase):
         ])
 
 
+class AdrNewTest(unittest.TestCase):
+    def test_new_adr_without_front_matter_fails(self):
+        verdict = adr_verdict(adr("0001", body=OLD_BODY), adr("0002", new=True))
+        self.assertEqual(verdict.errors, [
+            "docs/adr/0002-decision.md is a new ADR without front matter. A new ADR needs front matter with "
+            "`status`, `decided` and `updated`."
+        ])
+
+    def test_new_adr_with_front_matter_passes(self):
+        self.assertTrue(adr_verdict(adr("0001", body=OLD_BODY), adr("0002", ACCEPTED, new=True)).passed)
+
+    def test_old_adr_without_front_matter_stays_unchecked(self):
+        self.assertTrue(adr_verdict(adr("0001", body=OLD_BODY, new=False)).passed)
+
+    def test_file_names_missing_at_the_base_are_new(self):
+        cases = (
+            ("kept", ["0001-a.md"], ["0001-a.md"], [False]),
+            ("added", ["0001-a.md"], ["0001-a.md", "0002-b.md"], [False, True]),
+            ("renamed", ["0001-old-name.md"], ["0001-a.md"], [True]),
+            ("no folder at the base", None, ["0001-a.md", "0002-b.md"], [True, True]),
+        )
+        for name, base, head, expected in cases:
+            with self.subTest(name):
+                directories = {("docs/adr", "head-sha"): head}
+                if base is not None:
+                    directories[("docs/adr", "base-sha")] = base
+                client = FakeClient(
+                    directories=directories,
+                    files={(f"docs/adr/{file}", "head-sha"): "# A\n" for file in head},
+                )
+                self.assertEqual([adr.new for adr in load_adrs(client, "head-sha", "base-sha")], expected)
+
+    def test_old_and_new_adrs_without_front_matter_through_the_pull_request(self):
+        client = FakeClient(
+            graphql_data=pull_request_data(issues=[(1, GOOD_ISSUE)]),
+            directories={
+                ("docs/adr", "base-sha"): ["0001-a.md", "0002-before.md"],
+                ("docs/adr", "head-sha"): ["0001-a.md", "0002-after.md"],
+            },
+            files={("docs/adr/0001-a.md", "head-sha"): OLD_BODY, ("docs/adr/0002-after.md", "head-sha"): OLD_BODY},
+        )
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
+        self.assertEqual(code, 1)
+        self.assertEqual(output.count("::error::"), 1)
+        self.assertIn("::error::docs/adr/0002-after.md is a new ADR without front matter", output)
+
+
 class AdrMixTest(unittest.TestCase):
     def test_old_adrs_without_front_matter_stay_unchecked(self):
         verdict = adr_verdict(
@@ -1121,15 +1179,15 @@ class RunPullRequestTest(unittest.TestCase):
         self.assertIn("::error::", output)
 
 
-def load_adrs(client, ref):
+def load_adrs(client, head, base):
     """decisions.load_adrs with a FakeClient, which mirrors only the calls the tests make."""
-    return decisions.load_adrs(typing.cast(decisions.Client, client), ref)
+    return decisions.load_adrs(typing.cast(decisions.Client, client), head, base)
 
 
 class LoadAdrsTest(unittest.TestCase):
     def test_repository_without_adr_directory_has_nothing_to_check(self):
         client = FakeClient(graphql_data=pull_request_data(issues=[(1, GOOD_ISSUE)]))
-        self.assertEqual(load_adrs(client, "head-sha"), [])
+        self.assertEqual(load_adrs(client, "head-sha", "base-sha"), [])
         code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
         self.assertEqual(code, 0)
         self.assertNotIn("::error::", output)
@@ -1142,9 +1200,9 @@ class LoadAdrsTest(unittest.TestCase):
             directories={("docs/adr", "head-sha"): names, ("docs/adr", "base-sha"): ["0009-z.md"]},
             files={("docs/adr/0001-a.md", "head-sha"): "# A\n", ("docs/adr/0002-b.md", "head-sha"): "---\nstatus: x\n"},
         )
-        self.assertEqual(load_adrs(client, "head-sha"), [
-            Adr("docs/adr/0001-a.md", "# A\n"),
-            Adr("docs/adr/0002-b.md", "---\nstatus: x\n"),
+        self.assertEqual(load_adrs(client, "head-sha", "base-sha"), [
+            Adr("docs/adr/0001-a.md", "# A\n", new=True),
+            Adr("docs/adr/0002-b.md", "---\nstatus: x\n", new=True),
         ])
         code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
         self.assertEqual(code, 1)
@@ -1163,7 +1221,7 @@ class LoadAdrsTest(unittest.TestCase):
     def test_listed_adr_that_cannot_be_read_raises(self):
         client = FakeClient(directories={("docs/adr", "head-sha"): ["0001-a.md"]})
         with self.assertRaisesRegex(RuntimeError, "docs/adr/0001-a.md is listed at head-sha but could not be read"):
-            load_adrs(client, "head-sha")
+            load_adrs(client, "head-sha", "base-sha")
 
 
 def issue_data(*pulls):
@@ -1337,6 +1395,42 @@ class GitHubClientTest(unittest.TestCase):
         with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=http_error(500)):
             with self.assertRaises(urllib.error.HTTPError):
                 self.client.list_dir("docs/adr", "sha")
+
+    def test_paths_are_quoted_in_the_url(self):
+        listing = json.dumps([{"name": "0001-ä b.md", "type": "file"}]).encode()
+        base = "https://api.example/repos/octo/repo/contents/"
+        responses = {
+            base + "docs/adr?ref=head-sha": listing,
+            base + "docs/adr/0001-%C3%A4%20b.md?ref=head-sha": DECISION_BODY.encode(),
+        }
+
+        def urlopen(request, timeout):
+            if request.full_url in responses:
+                return FakeResponse(responses[request.full_url])
+            raise http_error(404)
+
+        with mock.patch.object(decisions.urllib.request, "urlopen", side_effect=urlopen):
+            adrs = decisions.load_adrs(self.client, "head-sha", "base-sha")
+        self.assertEqual(adrs, [Adr("docs/adr/0001-ä b.md", DECISION_BODY, new=True)])
+
+    def test_list_dir_quotes_the_directory(self):
+        with mock.patch.object(decisions.urllib.request, "urlopen", return_value=FakeResponse(b"[]")) as urlopen:
+            self.client.list_dir("docs/ä dr", "sha")
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url, "https://api.example/repos/octo/repo/contents/docs/%C3%A4%20dr?ref=sha"
+        )
+
+    def test_list_dir_raises_when_the_listing_may_be_cut_short(self):
+        def listing(count):
+            return FakeResponse(json.dumps([{"name": f"{n:04}-x.md", "type": "file"} for n in range(count)]).encode())
+
+        with mock.patch.object(decisions.urllib.request, "urlopen", return_value=listing(999)):
+            self.assertEqual(len(self.client.list_dir("docs/adr", "sha") or []), 999)
+        for count in (1000, 1001):
+            with self.subTest(count=count):
+                with mock.patch.object(decisions.urllib.request, "urlopen", return_value=listing(count)):
+                    with self.assertRaisesRegex(RuntimeError, f"docs/adr at sha has {count} entries"):
+                        self.client.list_dir("docs/adr", "sha")
 
 if __name__ == "__main__":
     unittest.main()

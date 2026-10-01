@@ -31,12 +31,12 @@ order:
    at the commit the caller pinned (see [Default community files](#default-community-files)). Repositories without
    the file are unaffected. Like rule 1, it applies to every pull request, so a bot's bump of the pin shows an
    outdated copy.
-3. Every ADR at the head commit that has front matter must follow the [ADR format](#adrs): `status`, `decided` and
-   `updated` are set; `status` is `proposed`, `accepted`, `rejected`, `deprecated` or `superseded`, and it is
-   `superseded` exactly when `superseded-by` is set; the dates are real dates and `updated` is not before `decided`;
-   each relation lists other ADRs that exist; and the body has no `## Status` section. A relation is declared on both
-   ends, and no ADR number is used twice. Repositories without `docs/adr/` are unaffected. Like rules 1 and 2, it
-   applies to every pull request.
+3. A new ADR at the head commit must have front matter, and every ADR with front matter must follow the
+   [ADR format](#adrs): `status`, `decided` and `updated` are set; `status` is `proposed`, `accepted`, `rejected`,
+   `deprecated` or `superseded`, and it is `superseded` exactly when `superseded-by` is set; the dates are real dates
+   and `updated` is not before `decided`; each relation lists other ADRs that exist; and the body has no `## Status`
+   section. A relation is declared on both ends, and no ADR number is used twice. Repositories without `docs/adr/` are
+   unaffected. Like rules 1 and 2, it applies to every pull request.
 4. A head branch starting with `renovate/` or `release-please--` in the pull request's own repository skips the rules
    below. A branch from a fork is never exempt, whatever its name, even after the fork is deleted.
 5. With an opt-out, the rules below are skipped.
@@ -88,9 +88,11 @@ the line, and the other rules for that ADR wait until it is fixed.
 A relation stands on both ends: when 0031 has `supersedes: [0020]`, 0020 has `superseded-by: [0031]`, and likewise
 `amends` with `amended-by`.
 
-An ADR without front matter is not checked. Two exceptions: when a relation points to it, it needs front matter, so the
-relation can stand on both ends; and when it shares its number with another ADR, the number counts as used twice if
-one of those files has front matter or a relation points to that number.
+An ADR that already existed without front matter is not checked; a new one must have it. An ADR is new when the
+pull request's base commit has no file of that name in `docs/adr/`, so renaming an ADR makes it new, and without
+`docs/adr/` on the base every ADR is new. An existing ADR without front matter has two exceptions: when a relation
+points to it, it needs front matter, so the relation can stand on both ends; and when it shares its number with another
+ADR, the number counts as used twice if one of those files has front matter or a relation points to that number.
 
 ### Opting out
 
