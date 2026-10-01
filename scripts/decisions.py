@@ -28,6 +28,9 @@ DECISIONS = "Decisions"
 TO_DECIDE = "To decide"
 CLAUDE_MD = "CLAUDE.md"
 CLAUDE_MD_SECTION = "Where decisions live"
+PLANNED_CHANGE = ".github/ISSUE_TEMPLATE/planned_change.yml"
+# The repository the shared form, and this script, come from.
+SHARED_REPOSITORY = "danielcopper/.github"
 # Issue forms render each field as a level-3 heading.
 ISSUE_HEADING_LEVELS = (2, 3)
 # What an issue form writes for an optional field left blank.
@@ -138,6 +141,14 @@ class Issue:
 
 
 @dataclass
+class SharedForm:
+    """The shared Planned change form, as checked out with this script."""
+
+    text: str
+    commit: str
+
+
+@dataclass
 class PullRequest:
     repository: str
     head_branch: str
@@ -146,6 +157,8 @@ class PullRequest:
     labels: list[str]
     base_claude_md: str | None
     head_claude_md: str | None
+    head_planned_change: str | None
+    shared_planned_change: SharedForm
     issues: list[Issue]
 
 
@@ -185,6 +198,16 @@ def claude_md_error(base: str | None, head: str | None) -> str | None:
     return None
 
 
+def planned_change_error(head: str | None, shared: SharedForm) -> str | None:
+    """The copy rule: a repository's own Planned change form must equal the shared one byte for byte."""
+    if head is None or head == shared.text:
+        return None
+    return (
+        f"{PLANNED_CHANGE} differs from the shared form at {SHARED_REPOSITORY}@{shared.commit[:7]}. "
+        "Copy the shared file over it unchanged."
+    )
+
+
 def issue_errors(issue: Issue, repository: str) -> list[str]:
     name = f"#{issue.number}" if issue.repository == repository else f"{issue.repository}#{issue.number}"
     errors = []
@@ -213,17 +236,21 @@ def evaluate(pr: PullRequest) -> Verdict:
     guard = claude_md_error(pr.base_claude_md, pr.head_claude_md)
     if guard:
         verdict.errors.append(guard)
+    copy = planned_change_error(pr.head_planned_change, pr.shared_planned_change)
+    if copy:
+        verdict.errors.append(copy)
 
     if is_exempt(pr.head_branch, pr.from_fork):
         verdict.notices.append(
-            f"Branch {pr.head_branch} is exempt from the linked-issue rules; only the {CLAUDE_MD} section is checked."
+            f"Branch {pr.head_branch} is exempt from the linked-issue rules; only the {CLAUDE_MD} section "
+            "and the Planned change copy are checked."
         )
         return verdict
 
     if is_opted_out(pr.labels, pr.body):
         verdict.notices.append(
             "Opted out of the linked-issue rules (`decisions: none` or the "
-            f"`{OPT_OUT_LABEL}` label); only the {CLAUDE_MD} section is checked."
+            f"`{OPT_OUT_LABEL}` label); only the {CLAUDE_MD} section and the Planned change copy are checked."
         )
         return verdict
 
@@ -342,7 +369,7 @@ def _repo_variables(repository: str, number: int) -> dict:
     return {"owner": owner, "name": name, "number": number}
 
 
-def load_pull_request(event: dict, client: Client, repository: str) -> PullRequest:
+def load_pull_request(event: dict, client: Client, repository: str, shared: SharedForm) -> PullRequest:
     """Build the PullRequest to judge.
 
     The commits come from the event, so the verdict belongs to the commit the
@@ -356,8 +383,11 @@ def load_pull_request(event: dict, client: Client, repository: str) -> PullReque
     from_fork = head_repo is None or head_repo["full_name"] != pr["base"]["repo"]["full_name"]
     base_claude_md = client.file_at(CLAUDE_MD, pr["base"]["sha"])
     head_claude_md = client.file_at(CLAUDE_MD, pr["head"]["sha"])
+    head_planned_change = client.file_at(PLANNED_CHANGE, pr["head"]["sha"])
     if is_exempt(head_branch, from_fork):
-        return PullRequest(repository, head_branch, from_fork, "", [], base_claude_md, head_claude_md, [])
+        return PullRequest(
+            repository, head_branch, from_fork, "", [], base_claude_md, head_claude_md, head_planned_change, shared, []
+        )
     data = client.graphql(PULL_REQUEST_QUERY, _repo_variables(repository, pr["number"]))
     live = data["repository"]["pullRequest"]
     return PullRequest(
@@ -368,6 +398,8 @@ def load_pull_request(event: dict, client: Client, repository: str) -> PullReque
         labels=[label["name"] for label in live["labels"]["nodes"]],
         base_claude_md=base_claude_md,
         head_claude_md=head_claude_md,
+        head_planned_change=head_planned_change,
+        shared_planned_change=shared,
         issues=[
             Issue(node["repository"]["nameWithOwner"], node["number"], node["body"] or "")
             for node in live["closingIssuesReferences"]["nodes"]
@@ -375,7 +407,13 @@ def load_pull_request(event: dict, client: Client, repository: str) -> PullReque
     )
 
 
-def run_pull_request(event: dict, client: Client, repository: str) -> int:
+def read_shared_form(path: str, commit: str) -> SharedForm:
+    """Read the shared form from the checkout as it is on disk, line endings included."""
+    with open(path, encoding="utf-8", newline="") as handle:
+        return SharedForm(handle.read(), commit)
+
+
+def run_pull_request(event: dict, client: Client, repository: str, shared: SharedForm) -> int:
     if "pull_request" not in event:
         _annotate("error", "The decisions workflow checks pull_request events and re-runs on issues events; "
                   "this event has no pull request.")
@@ -385,7 +423,7 @@ def run_pull_request(event: dict, client: Client, repository: str) -> int:
         _annotate("error", "The pull_request event names no base repository, so the check cannot tell whether the "
                   "pull request comes from a fork.")
         return 1
-    verdict = evaluate(load_pull_request(event, client, repository))
+    verdict = evaluate(load_pull_request(event, client, repository, shared))
     for notice in verdict.notices:
         _annotate("notice", notice)
     for error in verdict.errors:
@@ -438,7 +476,8 @@ def main(argv: list[str] | None = None) -> int:
         graphql_url=os.environ.get("GITHUB_GRAPHQL_URL", "https://api.github.com/graphql"),
     )
     if args.mode == "pull-request":
-        return run_pull_request(event, client, repository)
+        shared = read_shared_form(os.environ["SHARED_FORM"], os.environ["SHARED_FORM_COMMIT"])
+        return run_pull_request(event, client, repository, shared)
     return run_issue(event, client, repository, os.environ["CALLER_WORKFLOW_REF"])
 
 
