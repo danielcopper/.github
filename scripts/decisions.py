@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The decisions check: a pull request needs an issue whose decisions are written down.
+"""The decisions check: a pull request needs a maintainer's issue whose decisions are written down.
 
 Two modes, one per event the calling workflow runs on:
 
@@ -52,8 +52,7 @@ ADR_RELATIONS = {
 OPT_OUT_LABEL = "no-decisions"
 OPT_OUT_BODY = re.compile(r"decisions:\s*none", re.IGNORECASE)
 EXEMPT_BRANCH_PREFIXES = ("renovate/", "release-please--")
-# The authorAssociation values of a maintainer of the issue's repository; only
-# their issues are held to the decision rules.
+# The authorAssociation values of a maintainer of the issue's repository.
 MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 
 # Markdown as CommonMark reads it: headings and fences may be indented up to three spaces.
@@ -467,7 +466,7 @@ def is_exempt(branch: str, from_fork: bool) -> bool:
 
 
 def is_maintainer_issue(issue: Issue) -> bool:
-    """Whether a maintainer opened the issue. Without an association it counts as one, so the rules stay."""
+    """Whether a maintainer opened the issue. Without an association it counts as one, so the rules still apply."""
     return issue.author_association is None or issue.author_association in MAINTAINER_ASSOCIATIONS
 
 
@@ -566,9 +565,8 @@ def evaluate(pr: PullRequest) -> Verdict:
     outside = [issue_name(issue, pr.repository) for issue in pr.issues if not is_maintainer_issue(issue)]
     if not maintained:
         verdict.errors.append(
-            f"No linked issue was opened by a maintainer (an owner, member or collaborator): {', '.join(outside)}. "
-            "Open an issue of your own that links the report and carries the decisions under "
-            f"`## {DECISIONS}`, and link it with `Closes #N`."
+            "No linked issue was opened by a maintainer yet. A maintainer links the issue that carries the "
+            f"decisions to this pull request. Linked issues opened by someone else: {', '.join(outside)}."
         )
         return verdict
     if outside:

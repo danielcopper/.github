@@ -633,6 +633,10 @@ class MultipleIssuesTest(unittest.TestCase):
 OUTSIDE_REPORT = "**Describe the bug**\n\nIt crashes.\n"
 MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 OUTSIDE_ASSOCIATIONS = ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "MANNEQUIN", "NONE")
+NO_MAINTAINER_ISSUE = (
+    "No linked issue was opened by a maintainer yet. A maintainer links the issue that carries the decisions to this "
+    "pull request."
+)
 
 
 class OutsideIssueTest(unittest.TestCase):
@@ -672,18 +676,17 @@ class OutsideIssueTest(unittest.TestCase):
         self.assertEqual(len(verdict.notices), 1)
         self.assertIn("Issues #3, #5 were not opened by a maintainer", verdict.notices[0])
 
-    def test_outside_issue_alone_fails_and_says_to_open_an_own_issue(self):
+    def test_outside_issue_alone_fails_and_says_a_maintainer_links_the_decisions(self):
         verdict = evaluate(pull_request(issues=[issue(OUTSIDE_REPORT, number=3, association="NONE")]))
         self.assertFalse(verdict.passed)
         self.assertEqual(len(verdict.errors), 1)
         self.assertIn("#3", verdict.errors[0])
-        self.assertIn("Open an issue of your own that links", verdict.errors[0])
-        self.assertIn(f"`## {decisions.DECISIONS}`", verdict.errors[0])
+        self.assertIn(NO_MAINTAINER_ISSUE, verdict.errors[0])
 
     def test_outside_issue_alone_fails_even_with_decisions(self):
         verdict = evaluate(pull_request(issues=[issue(GOOD_ISSUE, number=3, association="CONTRIBUTOR")]))
         self.assertFalse(verdict.passed)
-        self.assertIn("Open an issue of your own that links", verdict.errors[0])
+        self.assertIn(NO_MAINTAINER_ISSUE, verdict.errors[0])
 
     def test_several_outside_issues_alone_fail_naming_each(self):
         verdict = evaluate(pull_request(issues=[
@@ -692,8 +695,8 @@ class OutsideIssueTest(unittest.TestCase):
         ]))
         self.assertFalse(verdict.passed)
         self.assertEqual(len(verdict.errors), 1)
-        self.assertIn("#3", verdict.errors[0])
-        self.assertIn("octo/other#5", verdict.errors[0])
+        self.assertIn(NO_MAINTAINER_ISSUE, verdict.errors[0])
+        self.assertTrue(verdict.errors[0].endswith("opened by someone else: #3, octo/other#5."), verdict.errors[0])
 
     def test_maintainer_issue_is_still_checked_beside_an_outside_issue(self):
         for association in MAINTAINER_ASSOCIATIONS:
@@ -727,7 +730,7 @@ class OutsideIssueTest(unittest.TestCase):
         self.assertTrue(verdict.passed)
 
 
-ACCEPTED ="status: accepted\ndecided: 2026-09-01\nupdated: 2026-09-01\n"
+ACCEPTED = "status: accepted\ndecided: 2026-09-01\nupdated: 2026-09-01\n"
 DECISION_BODY = "# Use one queue\n\nOne queue, not one per worker: it keeps the order.\n"
 OLD_BODY = "# Use one queue\n\n## Status\n\nAccepted.\n"
 
@@ -1300,7 +1303,7 @@ class RunPullRequestTest(unittest.TestCase):
         code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::", output)
-        self.assertIn("Open an issue of your own that links", output)
+        self.assertIn(NO_MAINTAINER_ISSUE, output)
 
     def test_null_or_missing_association_counts_as_a_maintainer_issue(self):
         for name, association in (("null", None), ("missing", ABSENT)):

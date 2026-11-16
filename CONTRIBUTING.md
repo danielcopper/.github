@@ -6,9 +6,9 @@ Thanks for your interest. These repositories are maintained by one person, so th
 
 1. Open an issue first. For a change, use the **Planned change** template. Typo fixes and dependency bumps don't
    need an issue.
-2. Open questions go under `## To decide`, one checkbox each. I answer them under `## Decisions` and check each
-   question off; a pull request merges only once every question is checked. Work started before a question is answered
-   may need to change.
+2. If the change needs decisions — open questions you list under `## To decide`, or ones I raise — I write them in an
+   issue of my own and link it to your pull request; it merges once every question there is answered. Work started
+   before a question is answered may need to change.
 
 ## The pull request
 
