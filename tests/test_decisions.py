@@ -94,8 +94,8 @@ body:
 SHARED = SharedForm(SHARED_FORM, "abcdef1234567890abcdef1234567890abcdef12")
 
 
-def issue(body, number=1, repository=REPO):
-    return Issue(repository=repository, number=number, body=body)
+def issue(body, number=1, repository=REPO, association: str | None = "OWNER"):
+    return Issue(repository=repository, number=number, body=body, author_association=association)
 
 
 def pull_request(**overrides):
@@ -630,7 +630,104 @@ class MultipleIssuesTest(unittest.TestCase):
         self.assertIn("Issue octo/other#4", verdict.errors[0])
 
 
-ACCEPTED = "status: accepted\ndecided: 2026-09-01\nupdated: 2026-09-01\n"
+OUTSIDE_REPORT = "**Describe the bug**\n\nIt crashes.\n"
+MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+OUTSIDE_ASSOCIATIONS = ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "MANNEQUIN", "NONE")
+
+
+class OutsideIssueTest(unittest.TestCase):
+    def test_outside_issue_without_sections_passes_beside_a_maintainer_issue(self):
+        for association in OUTSIDE_ASSOCIATIONS:
+            with self.subTest(association):
+                verdict = evaluate(pull_request(issues=[
+                    issue(OUTSIDE_REPORT, number=3, association=association),
+                    issue(GOOD_ISSUE, number=4),
+                ]))
+                self.assertTrue(verdict.passed, verdict.errors)
+
+    def test_outside_issue_with_open_questions_passes_beside_a_maintainer_issue(self):
+        body = "## To decide\n\n- [ ] Which way?\n"
+        verdict = evaluate(pull_request(issues=[
+            issue(body, number=3, association="NONE"),
+            issue(GOOD_ISSUE, number=4),
+        ]))
+        self.assertTrue(verdict.passed, verdict.errors)
+
+    def test_skipped_outside_issue_is_named_in_a_notice(self):
+        verdict = evaluate(pull_request(issues=[
+            issue(OUTSIDE_REPORT, number=3, association="CONTRIBUTOR"),
+            issue(GOOD_ISSUE, number=4),
+        ]))
+        self.assertEqual(len(verdict.notices), 1)
+        self.assertIn("#3", verdict.notices[0])
+        self.assertNotIn("#4", verdict.notices[0])
+
+    def test_several_skipped_outside_issues_share_one_notice(self):
+        verdict = evaluate(pull_request(issues=[
+            issue(OUTSIDE_REPORT, number=3, association="NONE"),
+            issue(GOOD_ISSUE, number=4),
+            issue(OUTSIDE_REPORT, number=5, association="CONTRIBUTOR"),
+        ]))
+        self.assertTrue(verdict.passed, verdict.errors)
+        self.assertEqual(len(verdict.notices), 1)
+        self.assertIn("Issues #3, #5 were not opened by a maintainer", verdict.notices[0])
+
+    def test_outside_issue_alone_fails_and_says_to_open_an_own_issue(self):
+        verdict = evaluate(pull_request(issues=[issue(OUTSIDE_REPORT, number=3, association="NONE")]))
+        self.assertFalse(verdict.passed)
+        self.assertEqual(len(verdict.errors), 1)
+        self.assertIn("#3", verdict.errors[0])
+        self.assertIn("Open an issue of your own that links", verdict.errors[0])
+        self.assertIn(f"`## {decisions.DECISIONS}`", verdict.errors[0])
+
+    def test_outside_issue_alone_fails_even_with_decisions(self):
+        verdict = evaluate(pull_request(issues=[issue(GOOD_ISSUE, number=3, association="CONTRIBUTOR")]))
+        self.assertFalse(verdict.passed)
+        self.assertIn("Open an issue of your own that links", verdict.errors[0])
+
+    def test_several_outside_issues_alone_fail_naming_each(self):
+        verdict = evaluate(pull_request(issues=[
+            issue(OUTSIDE_REPORT, number=3, association="NONE"),
+            issue(OUTSIDE_REPORT, number=5, repository="octo/other", association="CONTRIBUTOR"),
+        ]))
+        self.assertFalse(verdict.passed)
+        self.assertEqual(len(verdict.errors), 1)
+        self.assertIn("#3", verdict.errors[0])
+        self.assertIn("octo/other#5", verdict.errors[0])
+
+    def test_maintainer_issue_is_still_checked_beside_an_outside_issue(self):
+        for association in MAINTAINER_ASSOCIATIONS:
+            with self.subTest(association):
+                verdict = evaluate(pull_request(issues=[
+                    issue(OUTSIDE_REPORT, number=3, association="NONE"),
+                    issue("## Wanted\n\nY\n\n## To decide\n\n- [ ] Which way?\n", number=4, association=association),
+                ]))
+                self.assertFalse(verdict.passed)
+                self.assertEqual(len(verdict.errors), 2)
+                self.assertIn("Issue #4 has no `## Decisions` section", verdict.errors[0])
+                self.assertIn('"- [ ] Which way?"', verdict.errors[1])
+
+    def test_issue_without_an_association_counts_as_a_maintainer_issue(self):
+        verdict = evaluate(pull_request(issues=[issue(OUTSIDE_REPORT, number=3, association=None)]))
+        self.assertFalse(verdict.passed)
+        self.assertEqual(len(verdict.errors), 1)
+        self.assertIn("Issue #3 has no `## Decisions` section", verdict.errors[0])
+
+    def test_issue_without_an_association_satisfies_the_link_rule(self):
+        verdict = evaluate(pull_request(issues=[
+            issue(OUTSIDE_REPORT, number=3, association="NONE"),
+            issue(GOOD_ISSUE, number=4, association=None),
+        ]))
+        self.assertTrue(verdict.passed, verdict.errors)
+
+    def test_opt_out_skips_an_outside_issue_alone(self):
+        verdict = evaluate(pull_request(
+            labels=["no-decisions"], issues=[issue(OUTSIDE_REPORT, number=3, association="NONE")],
+        ))
+        self.assertTrue(verdict.passed)
+
+
+ACCEPTED ="status: accepted\ndecided: 2026-09-01\nupdated: 2026-09-01\n"
 DECISION_BODY = "# Use one queue\n\nOne queue, not one per worker: it keeps the order.\n"
 OLD_BODY = "# Use one queue\n\n## Status\n\nAccepted.\n"
 
@@ -1060,13 +1157,23 @@ def deleted_fork_event(head_ref="feature/thing"):
     return event
 
 
+# Leaves authorAssociation out of an issue node.
+ABSENT = object()
+
+
+def issue_node(number, text, association="OWNER"):
+    node = {"number": number, "body": text, "repository": {"nameWithOwner": REPO}}
+    if association is not ABSENT:
+        node["authorAssociation"] = association
+    return node
+
+
 def pull_request_data(body="Closes #1", labels=(), issues=()):
+    """issues are (number, body) or (number, body, authorAssociation) tuples; the association defaults to OWNER."""
     return {"repository": {"pullRequest": {
         "body": body,
         "labels": {"nodes": [{"name": name} for name in labels]},
-        "closingIssuesReferences": {"nodes": [
-            {"number": number, "body": text, "repository": {"nameWithOwner": REPO}} for number, text in issues
-        ]},
+        "closingIssuesReferences": {"nodes": [issue_node(*entry) for entry in issues]},
     }}}
 
 
@@ -1177,6 +1284,31 @@ class RunPullRequestTest(unittest.TestCase):
         code, output = run_quietly(decisions.run_pull_request, {"push": {}}, FakeClient(), REPO, SHARED)
         self.assertEqual(code, 1)
         self.assertIn("::error::", output)
+
+    def test_query_asks_for_the_author_association_of_each_linked_issue(self):
+        nodes = decisions.PULL_REQUEST_QUERY.split("closingIssuesReferences", 1)[1].split("}", 1)[0]
+        self.assertIn("authorAssociation", nodes)
+
+    def test_reads_the_author_association_of_each_linked_issue(self):
+        client = FakeClient(graphql_data=pull_request_data(issues=[(3, OUTSIDE_REPORT, "NONE"), (4, GOOD_ISSUE)]))
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
+        self.assertEqual(code, 0)
+        self.assertIn("::notice::", output)
+
+    def test_outside_issue_alone_fails_over_the_api(self):
+        client = FakeClient(graphql_data=pull_request_data(issues=[(3, OUTSIDE_REPORT, "FIRST_TIMER")]))
+        code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
+        self.assertEqual(code, 1)
+        self.assertIn("::error::", output)
+        self.assertIn("Open an issue of your own that links", output)
+
+    def test_null_or_missing_association_counts_as_a_maintainer_issue(self):
+        for name, association in (("null", None), ("missing", ABSENT)):
+            with self.subTest(name):
+                client = FakeClient(graphql_data=pull_request_data(issues=[(3, OUTSIDE_REPORT, association)]))
+                code, output = run_quietly(decisions.run_pull_request, pull_request_event(), client, REPO, SHARED)
+                self.assertEqual(code, 1)
+                self.assertIn("::error::Issue #3 has no `## Decisions` section", output)
 
 
 def load_adrs(client, head, base):

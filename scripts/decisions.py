@@ -52,6 +52,9 @@ ADR_RELATIONS = {
 OPT_OUT_LABEL = "no-decisions"
 OPT_OUT_BODY = re.compile(r"decisions:\s*none", re.IGNORECASE)
 EXEMPT_BRANCH_PREFIXES = ("renovate/", "release-please--")
+# The authorAssociation values of a maintainer of the issue's repository; only
+# their issues are held to the decision rules.
+MAINTAINER_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
 
 # Markdown as CommonMark reads it: headings and fences may be indented up to three spaces.
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
@@ -417,9 +420,12 @@ def _relation(front: FrontMatter, key: str) -> list[str]:
 
 @dataclass
 class Issue:
+    """A linked issue. author_association is GitHub's authorAssociation of its author, None when not given."""
+
     repository: str
     number: int
     body: str
+    author_association: str | None
 
 
 @dataclass
@@ -460,6 +466,11 @@ def is_exempt(branch: str, from_fork: bool) -> bool:
     return not from_fork and branch.startswith(EXEMPT_BRANCH_PREFIXES)
 
 
+def is_maintainer_issue(issue: Issue) -> bool:
+    """Whether a maintainer opened the issue. Without an association it counts as one, so the rules stay."""
+    return issue.author_association is None or issue.author_association in MAINTAINER_ASSOCIATIONS
+
+
 def is_opted_out(labels: list[str], body: str) -> bool:
     return OPT_OUT_LABEL in labels or bool(OPT_OUT_BODY.search(body))
 
@@ -491,8 +502,12 @@ def planned_change_error(head: str | None, shared: SharedForm) -> str | None:
     )
 
 
+def issue_name(issue: Issue, repository: str) -> str:
+    return f"#{issue.number}" if issue.repository == repository else f"{issue.repository}#{issue.number}"
+
+
 def issue_errors(issue: Issue, repository: str) -> list[str]:
-    name = f"#{issue.number}" if issue.repository == repository else f"{issue.repository}#{issue.number}"
+    name = issue_name(issue, repository)
     errors = []
     if not has_heading(issue.body, DECISIONS, ISSUE_HEADING_LEVELS):
         errors.append(
@@ -547,7 +562,22 @@ def evaluate(pr: PullRequest) -> Verdict:
         )
         return verdict
 
-    for issue in pr.issues:
+    maintained = [issue for issue in pr.issues if is_maintainer_issue(issue)]
+    outside = [issue_name(issue, pr.repository) for issue in pr.issues if not is_maintainer_issue(issue)]
+    if not maintained:
+        verdict.errors.append(
+            f"No linked issue was opened by a maintainer (an owner, member or collaborator): {', '.join(outside)}. "
+            "Open an issue of your own that links the report and carries the decisions under "
+            f"`## {DECISIONS}`, and link it with `Closes #N`."
+        )
+        return verdict
+    if outside:
+        named = f"Issue {outside[0]} was" if len(outside) == 1 else f"Issues {', '.join(outside)} were"
+        verdict.notices.append(
+            f"{named} not opened by a maintainer (an owner, member or collaborator), so `## {DECISIONS}` "
+            f"and `## {TO_DECIDE}` are not checked there."
+        )
+    for issue in maintained:
         verdict.errors.extend(issue_errors(issue, pr.repository))
     return verdict
 
@@ -654,7 +684,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       body
       labels(first: 100) { nodes { name } }
       closingIssuesReferences(first: 100) {
-        nodes { number body repository { nameWithOwner } }
+        nodes { number body authorAssociation repository { nameWithOwner } }
       }
     }
   }
@@ -733,7 +763,10 @@ def load_pull_request(event: dict, client: Client, repository: str, shared: Shar
         shared_planned_change=shared,
         adrs=adrs,
         issues=[
-            Issue(node["repository"]["nameWithOwner"], node["number"], node["body"] or "")
+            Issue(
+                node["repository"]["nameWithOwner"], node["number"], node["body"] or "",
+                node.get("authorAssociation"),
+            )
             for node in live["closingIssuesReferences"]["nodes"]
         ],
     )
