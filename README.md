@@ -18,8 +18,8 @@ copy of Planned change; rule 2 of the `decisions` check keeps that copy identica
 ## The `decisions` check
 
 An issue's open questions sit under `## To decide`, one checkbox each. Once a question is answered under `## Decisions`,
-it is checked off. A pull request must link an issue whose decisions are written down and whose questions are all
-checked off.
+it is checked off. A pull request must link a maintainer's issue whose decisions are written down and whose questions
+are all checked off.
 
 [`.github/workflows/decisions.yml`](.github/workflows/decisions.yml) enforces this. On a pull request it checks, in
 order:
@@ -41,11 +41,17 @@ order:
    below. A branch from a fork is never exempt, whatever its name, even after the fork is deleted.
 5. With an opt-out, the rules below are skipped.
 6. The pull request must link at least one issue (`Closes #N`, `Fixes #N`, `Resolves #N`, or a link set in the
-   sidebar). Closing keywords only link an issue when the pull request targets the default branch.
-7. Every linked issue needs a `## Decisions` section with some text in it. A pointer such as "See epic #1896." is
-   enough.
-8. No linked issue may have an open question: under `## To decide`, every item is a checked task-list item (`- [x]`);
-   an unchecked item or any other text there counts as open. An empty section holds no open questions.
+   sidebar), and at least one of them must be a maintainer's issue (defined below the rules). Closing keywords only
+   link an issue when the pull request targets the default branch. When the linked issues all come from someone else,
+   a maintainer links the issue that carries the decisions to the pull request; the pull request's author need not
+   open another one.
+7. Every linked maintainer's issue needs a `## Decisions` section with some text in it. A pointer such as
+   "See epic #1896." is enough.
+8. No linked maintainer's issue may have an open question: under `## To decide`, every item is a checked task-list
+   item (`- [x]`); an unchecked item or any other text there counts as open. An empty section holds no open questions.
+
+A maintainer's issue is one whose author GitHub lists as `OWNER`, `MEMBER` or `COLLABORATOR` of the issue's
+repository (its `authorAssociation`). Rules 7 and 8 skip any other linked issue, and the check names it in a notice.
 
 `_No response_`, which an issue form writes for a field left blank, does not count as text.
 
