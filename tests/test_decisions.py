@@ -1159,7 +1159,7 @@ class RunPullRequestTest(unittest.TestCase):
                 self.assertIn("::error::No linked issue", output)
 
     def test_deleted_fork_bot_branch_is_not_exempt(self):
-        for branch in ("renovate/x", "dependabot/npm_and_yarn/x"):
+        for branch in ("renovate/x", "release-please--branches--main", "dependabot/npm_and_yarn/x"):
             with self.subTest(branch=branch):
                 event = deleted_fork_event(branch)
                 client = FakeClient(graphql_data=pull_request_data())
