@@ -154,6 +154,12 @@ class ExemptBranchTest(unittest.TestCase):
                 verdict = evaluate(pull_request(head_branch=branch, issues=[]))
                 self.assertFalse(verdict.passed)
 
+    def test_prefix_without_its_slash_is_not_exempt(self):
+        for branch in ("renovate-x", "dependabot-x"):
+            with self.subTest(branch=branch):
+                verdict = evaluate(pull_request(head_branch=branch, issues=[]))
+                self.assertFalse(verdict.passed)
+
 
 class ClaudeMdGuardTest(unittest.TestCase):
     def test_base_and_head_with_section_pass(self):
@@ -1108,7 +1114,7 @@ class RunPullRequestTest(unittest.TestCase):
         self.assertIn("::notice::Opted out", output)
 
     def test_exempt_branch_skips_the_pull_request_query(self):
-        for branch in ("renovate/x", "dependabot/npm_and_yarn/x"):
+        for branch in ("renovate/x", "release-please--branches--main", "dependabot/npm_and_yarn/x"):
             with self.subTest(branch=branch):
                 client = FakeClient()
                 code, _ = run_quietly(decisions.run_pull_request, pull_request_event(branch), client, REPO, SHARED)
@@ -1144,7 +1150,7 @@ class RunPullRequestTest(unittest.TestCase):
         self.assertEqual(client.graphql_calls, [])
 
     def test_bot_branch_from_a_fork_gets_the_issue_rules(self):
-        for branch in ("renovate/x", "dependabot/npm_and_yarn/x"):
+        for branch in ("renovate/x", "release-please--branches--main", "dependabot/npm_and_yarn/x"):
             with self.subTest(branch=branch):
                 client = FakeClient(graphql_data=pull_request_data())
                 event = pull_request_event(branch, head_repository="someone/repo")
@@ -1153,12 +1159,14 @@ class RunPullRequestTest(unittest.TestCase):
                 self.assertIn("::error::No linked issue", output)
 
     def test_deleted_fork_bot_branch_is_not_exempt(self):
-        event = deleted_fork_event("renovate/x")
-        client = FakeClient(graphql_data=pull_request_data())
-        code, output = run_quietly(decisions.run_pull_request, event, client, REPO, SHARED)
-        self.assertEqual(code, 1)
-        self.assertIn("::error::No linked issue", output)
-        self.assertNotIn("exempt", output)
+        for branch in ("renovate/x", "dependabot/npm_and_yarn/x"):
+            with self.subTest(branch=branch):
+                event = deleted_fork_event(branch)
+                client = FakeClient(graphql_data=pull_request_data())
+                code, output = run_quietly(decisions.run_pull_request, event, client, REPO, SHARED)
+                self.assertEqual(code, 1)
+                self.assertIn("::error::No linked issue", output)
+                self.assertNotIn("exempt", output)
 
     def test_deleted_fork_can_opt_out(self):
         client = FakeClient(
