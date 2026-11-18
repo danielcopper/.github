@@ -37,8 +37,8 @@ order:
    and `updated` is not before `decided`; each relation lists other ADRs that exist; and the body has no `## Status`
    section. A relation is declared on both ends, and no ADR number is used twice. Repositories without `docs/adr/` are
    unaffected. Like rules 1 and 2, it applies to every pull request.
-4. A head branch starting with `renovate/` or `release-please--` in the pull request's own repository skips the rules
-   below. A branch from a fork is never exempt, whatever its name, even after the fork is deleted.
+4. A head branch starting with `renovate/`, `dependabot/` or `release-please--` in the pull request's own repository
+   skips the rules below. A branch from a fork is never exempt, whatever its name, even after the fork is deleted.
 5. With an opt-out, the rules below are skipped.
 6. The pull request must link at least one issue (`Closes #N`, `Fixes #N`, `Resolves #N`, or a link set in the
    sidebar). Closing keywords only link an issue when the pull request targets the default branch.
