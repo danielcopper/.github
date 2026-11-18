@@ -125,8 +125,13 @@ class ExemptBranchTest(unittest.TestCase):
         verdict = evaluate(pull_request(head_branch="release-please--branches--main", issues=[]))
         self.assertTrue(verdict.passed)
 
+    def test_dependabot_branch_is_exempt_from_the_issue_rules(self):
+        verdict = evaluate(pull_request(head_branch="dependabot/npm_and_yarn/some-dependency-1.2.3", issues=[]))
+        self.assertTrue(verdict.passed)
+        self.assertIn("exempt", verdict.notices[0])
+
     def test_bot_branch_from_a_fork_is_not_exempt(self):
-        for branch in ("renovate/x", "release-please--branches--main"):
+        for branch in ("renovate/x", "release-please--branches--main", "dependabot/npm_and_yarn/x"):
             with self.subTest(branch=branch):
                 verdict = evaluate(pull_request(head_branch=branch, from_fork=True, issues=[]))
                 self.assertFalse(verdict.passed)
@@ -144,8 +149,10 @@ class ExemptBranchTest(unittest.TestCase):
         self.assertIn("removes the section `## Where decisions live`", verdict.errors[0])
 
     def test_branch_that_only_contains_the_prefix_is_not_exempt(self):
-        verdict = evaluate(pull_request(head_branch="feature/renovate/x", issues=[]))
-        self.assertFalse(verdict.passed)
+        for branch in ("feature/renovate/x", "feature/dependabot/x"):
+            with self.subTest(branch=branch):
+                verdict = evaluate(pull_request(head_branch=branch, issues=[]))
+                self.assertFalse(verdict.passed)
 
 
 class ClaudeMdGuardTest(unittest.TestCase):
@@ -226,7 +233,7 @@ class PlannedChangeCopyTest(unittest.TestCase):
         self.assertFalse(verdict.passed)
 
     def test_exempt_bot_branch_still_checks_the_copy(self):
-        for branch in ("renovate/x", "release-please--branches--main"):
+        for branch in ("renovate/x", "release-please--branches--main", "dependabot/npm_and_yarn/x"):
             with self.subTest(branch=branch):
                 verdict = evaluate(pull_request(head_branch=branch, issues=[], head_planned_change=OUTDATED_FORM))
                 self.assertFalse(verdict.passed)
@@ -1101,10 +1108,12 @@ class RunPullRequestTest(unittest.TestCase):
         self.assertIn("::notice::Opted out", output)
 
     def test_exempt_branch_skips_the_pull_request_query(self):
-        client = FakeClient()
-        code, _ = run_quietly(decisions.run_pull_request, pull_request_event("renovate/x"), client, REPO, SHARED)
-        self.assertEqual(code, 0)
-        self.assertEqual(client.graphql_calls, [])
+        for branch in ("renovate/x", "dependabot/npm_and_yarn/x"):
+            with self.subTest(branch=branch):
+                client = FakeClient()
+                code, _ = run_quietly(decisions.run_pull_request, pull_request_event(branch), client, REPO, SHARED)
+                self.assertEqual(code, 0)
+                self.assertEqual(client.graphql_calls, [])
 
     def test_exempt_branch_still_runs_the_claude_md_guard(self):
         client = FakeClient(files={("CLAUDE.md", "base-sha"): CLAUDE_WITH_SECTION})
@@ -1135,11 +1144,13 @@ class RunPullRequestTest(unittest.TestCase):
         self.assertEqual(client.graphql_calls, [])
 
     def test_bot_branch_from_a_fork_gets_the_issue_rules(self):
-        client = FakeClient(graphql_data=pull_request_data())
-        event = pull_request_event("renovate/x", head_repository="someone/repo")
-        code, output = run_quietly(decisions.run_pull_request, event, client, REPO, SHARED)
-        self.assertEqual(code, 1)
-        self.assertIn("::error::No linked issue", output)
+        for branch in ("renovate/x", "dependabot/npm_and_yarn/x"):
+            with self.subTest(branch=branch):
+                client = FakeClient(graphql_data=pull_request_data())
+                event = pull_request_event(branch, head_repository="someone/repo")
+                code, output = run_quietly(decisions.run_pull_request, event, client, REPO, SHARED)
+                self.assertEqual(code, 1)
+                self.assertIn("::error::No linked issue", output)
 
     def test_deleted_fork_bot_branch_is_not_exempt(self):
         event = deleted_fork_event("renovate/x")

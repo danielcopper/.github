@@ -51,7 +51,7 @@ ADR_RELATIONS = {
 }
 OPT_OUT_LABEL = "no-decisions"
 OPT_OUT_BODY = re.compile(r"decisions:\s*none", re.IGNORECASE)
-EXEMPT_BRANCH_PREFIXES = ("renovate/", "release-please--")
+EXEMPT_BRANCH_PREFIXES = ("renovate/", "dependabot/", "release-please--")
 
 # Markdown as CommonMark reads it: headings and fences may be indented up to three spaces.
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
